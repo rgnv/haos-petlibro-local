@@ -31,16 +31,20 @@ service, broker, feeder, camera, or deployment was contacted during this port.
   than 240 seconds publishes offline once. No initial offline/LWT is added.
   As in Python, offline state changes before attempting publication, so a broker
   outage at that instant can leave retained status stale until another heartbeat.
+  Status also carries cached allowlisted attributes and the first 12 schedule
+  objects, reloaded from disk on each heartbeat with Python defaults.
 - Schedule file defaults to `/root/polar_schedule.json`, reloads every 20 seconds,
   and tolerates absence. Monday=0. Five-minute catch-up uses elapsed UTC minutes,
   then local timezone matching. Deduplication uses date/time/plate, including DST
   folds and duplicate rows; invalid rows do not starve valid rows. Rejected sends
   retry within the catch-up window. Deduplication expires after three days and is
   process-local, so restarting within a scheduled minute can repeat a feed.
-- Requested `polar/cmd/set` is **new**: the checked-in Python service has no such
-  handler. A nonempty flat attribute object becomes `ATTR_SET_SERVICE`; caller
-  cannot override protocol envelope fields. Attribute values pass through without
-  inventing undocumented device constraints.
+- `polar/cmd/set` uses `{"attr":"volume","value":50}` and the exact Python
+  allowlist, including `platePosition`. Null values and unknown attributes are
+  rejected; values otherwise pass through unchanged. The local attribute cache
+  updates before publish, even if disconnected, matching Python. Incoming
+  `ATTR_PUSH_EVENT` updates only allowlisted keys. `polar/cmd/bell` emits an
+  `ATTR_SET_SERVICE` with `ringerMode:"RING"` and a `bell-` message ID.
 
 ## Recorder parity
 
@@ -93,7 +97,8 @@ credentials when deployed; existing capture-redaction guidance still applies.
 
 Rust tests port the service-related payload, routing, validation, schedule,
 publication-failure, and deferred-config cases from `polar/tests/test_polar.py`.
-Additional checks cover heartbeat/offline recovery, attribute envelope protection,
+Additional checks cover heartbeat/offline recovery, attribute allowlisting/state,
+bell commands, schedule status summaries, unbounded positive feed integers,
 fractional timezone offsets, recorder arguments/atomic files/failures/timeouts,
 symlink rejection, relay bytes formatting, bidirectional forwarding and closure.
 Relay tests use Tokio in-memory duplex streams; recorder tests use local stub
@@ -104,3 +109,11 @@ fails because `rumqttc` is absent from the local Cargo cache. The task prohibits
 network access. A local dependency cache or explicit dependency-download permission
 is required before the full build/test acceptance criterion can be met. No build
 success or live/hardware parity is claimed while this blocker remains.
+
+Offline partial verification passed: 29 Python protocol tests, 9 release tests,
+26 Rust cloud tests, 4 relay tests, and 4 recorder tests. Rust partial
+checks used ignored temporary manifests under `.review/rust-offline/` to exclude
+the unavailable MQTT dependency; the recorder copy excluded its MQTT main loop.
+They are not substitutes for building/testing the real workspace. Formatting
+and shell syntax checks also passed. The Rust control surface matches the Python
+reference through commit `d4760de`, including its concurrent allowlist update.

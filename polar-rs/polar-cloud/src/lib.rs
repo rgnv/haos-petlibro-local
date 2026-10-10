@@ -15,6 +15,20 @@ pub const EVENTS: [&str; 4] = [
     "GET_FEEDING_PLAN_EVENT",
     "WET_GRAIN_OUTPUT_EVENT",
 ];
+pub const SETTABLE_ATTRS: [&str; 12] = [
+    "lightSwitch",
+    "enableLight",
+    "enableSound",
+    "soundSwitch",
+    "volume",
+    "ringerMode",
+    "ringerInterval",
+    "ringerDuration",
+    "closeDoorTime",
+    "platePosition",
+    "doorCheckSignalTime",
+    "doorNotcheckSignalTime",
+];
 fn id() -> String {
     Uuid::new_v4().simple().to_string()
 }
@@ -80,8 +94,14 @@ pub fn config_payload(host: &str, port: u16, now: DateTime<Utc>) -> Value {
         "mqttAddr":[{"host":host,"port":port}], "httpsAddr":"api.us.petlibro.com", "linkId":id()})
 }
 fn positive(value: &Value, name: &str) -> Result<()> {
+    let integer = value
+        .as_number()
+        .map(ToString::to_string)
+        .unwrap_or_default();
     ensure!(
-        value.as_u64().is_some_and(|v| v > 0),
+        !integer.is_empty()
+            && integer.bytes().all(|b| b.is_ascii_digit())
+            && integer.bytes().any(|b| b != b'0'),
         "{name} must be a positive integer"
     );
     Ok(())
@@ -111,18 +131,39 @@ pub fn echo_payload(base: &str, topic: &str, data: &Value, now: DateTime<Utc>) -
     Some(echo)
 }
 pub fn set_payload(data: &Value, now: DateTime<Utc>) -> Result<Value> {
-    let attrs = data
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("attributes must be an object"))?;
-    ensure!(!attrs.is_empty(), "attributes must not be empty");
-    for key in ["cmd", "ts", "msgId", "linkId", "code"] {
-        ensure!(!attrs.contains_key(key), "reserved attribute: {key}");
-    }
-    let mut result = data.clone();
-    result["cmd"] = json!("ATTR_SET_SERVICE");
-    result["ts"] = json!(now.timestamp_millis());
-    result["msgId"] = json!(id());
+    let attr = data.get("attr").and_then(Value::as_str).unwrap_or("");
+    let value = data.get("value").unwrap_or(&Value::Null);
+    ensure!(
+        SETTABLE_ATTRS.contains(&attr) && !value.is_null(),
+        "invalid or disallowed set"
+    );
+    let mut result = json!({"cmd":"ATTR_SET_SERVICE", "ts":now.timestamp_millis(), "msgId":format!("set-{}", &id()[..8])});
+    result[attr] = value.clone();
     Ok(result)
+}
+pub fn schedule_summary(path: &std::path::Path) -> Result<Value> {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(json!([])),
+        Err(err) => return Err(err.into()),
+    };
+    let entries = serde_json::from_slice::<Value>(&raw).unwrap_or(Value::Null);
+    let Some(entries) = entries.as_array() else {
+        return Ok(json!([]));
+    };
+    Ok(Value::Array(
+        entries
+            .iter()
+            .filter(|e| e.is_object())
+            .take(12)
+            .map(|e| {
+                json!({
+                    "time":e.get("time"), "plate":e.get("plate").unwrap_or(&json!(1)),
+                    "duration":e.get("duration").unwrap_or(&json!(240)), "days":e.get("days")
+                })
+            })
+            .collect(),
+    ))
 }
 
 pub type ScheduleKey = (String, String, String);
@@ -182,6 +223,8 @@ pub struct Cloud {
     pub config_due: Option<Instant>,
     pub last_heart: Option<Instant>,
     pub status_online: bool,
+    pub attrs: serde_json::Map<String, Value>,
+    pub schedule_file: std::path::PathBuf,
     // shortcut: deduplication is process-local; add a durable ledger for restart safety.
     pub last_fired: HashMap<ScheduleKey, i64>,
     pub previous_minute: Option<i64>,
@@ -199,6 +242,8 @@ impl Cloud {
             config_due: None,
             last_heart: None,
             status_online: false,
+            attrs: serde_json::Map::new(),
+            schedule_file: "/root/polar_schedule.json".into(),
             last_fired: HashMap::new(),
             previous_minute: None,
         }
@@ -242,7 +287,7 @@ impl Cloud {
         if topic == format!("{}/heart/post", self.base) && cmd == "HEARTBEAT" {
             self.last_heart = Some(mono);
             self.status_online = true;
-            self.publish("polar/status", json!({"online":true,"count":data["count"],"rssi":data["rssi"],"temperature":data["temperature"],"device_ts":data["ts"],"seen_at":now.timestamp_millis()}), true, send);
+            self.publish("polar/status", json!({"online":true,"count":data["count"],"rssi":data["rssi"],"temperature":data["temperature"],"device_ts":data["ts"],"seen_at":now.timestamp_millis(),"attrs":self.attrs,"schedule":schedule_summary(&self.schedule_file)?}), true, send);
         } else if topic == format!("{}/ntp/post", self.base) && cmd == "NTP" {
             self.publish(
                 &format!("{}/ntp/sub", self.base),
@@ -251,6 +296,13 @@ impl Cloud {
                 send,
             );
         } else if topic == format!("{}/event/post", self.base) {
+            if cmd == "ATTR_PUSH_EVENT" {
+                for (key, value) in data.as_object().unwrap() {
+                    if SETTABLE_ATTRS.contains(&key.as_str()) {
+                        self.attrs.insert(key.clone(), value.clone());
+                    }
+                }
+            }
             if let Some(echo) = echo_payload(&self.base, topic, &data, now) {
                 self.publish(&format!("{}/event/sub", self.base), echo, false, send);
             }
@@ -273,7 +325,14 @@ impl Cloud {
                 send,
             );
         } else if topic == "polar/cmd/set" {
-            self.publish(&service, set_payload(&data, now)?, false, send);
+            let payload = set_payload(&data, now)?;
+            self.attrs.insert(
+                data["attr"].as_str().unwrap().to_owned(),
+                data["value"].clone(),
+            );
+            self.publish(&service, payload, false, send);
+        } else if topic == "polar/cmd/bell" {
+            self.publish(&service, json!({"cmd":"ATTR_SET_SERVICE", "ts":now.timestamp_millis(), "msgId":format!("bell-{}", &id()[..8]), "ringerMode":"RING"}), false, send);
         }
         Ok(())
     }

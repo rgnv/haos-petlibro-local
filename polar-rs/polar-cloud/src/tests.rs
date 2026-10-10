@@ -10,6 +10,8 @@ fn cloud() -> Cloud {
         1884,
     );
     c.connected = true;
+    c.schedule_file =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/nonexistent-schedule.json");
     c
 }
 fn now() -> DateTime<Utc> {
@@ -500,30 +502,104 @@ fn heartbeat_status_online_offline_and_recovery() {
     .unwrap();
 }
 #[test]
-fn attribute_helper_protects_envelope() {
+fn attribute_helper_allowlist_and_state() {
     let mut c = cloud();
+    for attr in SETTABLE_ATTRS {
+        c.message(
+            "polar/cmd/set",
+            json!({"attr":attr,"value":false}).to_string().as_bytes(),
+            false,
+            now(),
+            Instant::now(),
+            &mut |t, p, r| {
+                assert!(t.ends_with("/service/sub"));
+                assert_eq!(p["cmd"], "ATTR_SET_SERVICE");
+                assert_eq!(p[attr], false);
+                assert!(p["msgId"].as_str().unwrap().starts_with("set-"));
+                assert!(!r);
+                true
+            },
+        )
+        .unwrap();
+        assert_eq!(c.attrs[attr], false);
+    }
+    for bad in [
+        json!({}),
+        json!({"attr":"cmd","value":"RESTORE"}),
+        json!({"attr":"volume","value":null}),
+        json!({"attr":[],"value":1}),
+    ] {
+        assert!(set_payload(&bad, now()).is_err());
+    }
     c.message(
-        "polar/cmd/set",
-        br#"{"volume":50,"enableSound":false}"#,
+        &format!("{}/event/post", c.base),
+        br#"{"cmd":"ATTR_PUSH_EVENT","volume":50,"wifiSsid":"private"}"#,
         false,
         now(),
         Instant::now(),
-        &mut |t, p, r| {
-            assert!(t.ends_with("/service/sub"));
-            assert_eq!(p["cmd"], "ATTR_SET_SERVICE");
-            assert_eq!(p["volume"], 50);
-            assert_eq!(p["enableSound"], false);
-            assert!(!r);
+        &mut |_, _, _| true,
+    )
+    .unwrap();
+    assert_eq!(c.attrs["volume"], 50);
+    assert!(!c.attrs.contains_key("wifiSsid"));
+    c.message(
+        &format!("{}/heart/post", c.base),
+        br#"{"cmd":"HEARTBEAT"}"#,
+        false,
+        now(),
+        Instant::now(),
+        &mut |_, p, r| {
+            assert_eq!(p["attrs"]["volume"], 50);
+            assert_eq!(p["schedule"], json!([]));
+            assert!(r);
             true
         },
     )
     .unwrap();
-    for key in ["cmd", "ts", "msgId", "linkId", "code"] {
-        let mut v = json!({"volume":50});
-        v[key] = json!("bad");
-        assert!(set_payload(&v, now()).is_err());
+}
+#[test]
+fn bell_command_and_retained_guard() {
+    let mut c = cloud();
+    let mut calls = 0;
+    for retained in [true, false] {
+        c.message(
+            "polar/cmd/bell",
+            b"{}",
+            retained,
+            now(),
+            Instant::now(),
+            &mut |_, p, r| {
+                calls += 1;
+                assert_eq!(p["ringerMode"], "RING");
+                assert!(p["msgId"].as_str().unwrap().starts_with("bell-"));
+                assert!(!r);
+                true
+            },
+        )
+        .unwrap();
     }
-    assert!(set_payload(&json!({}), now()).is_err());
+    assert_eq!(calls, 1);
+    assert!(c.attrs.is_empty());
+}
+#[test]
+fn summary_defaults_limit_and_malformed_file() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join(format!("summary-{}.json", id()));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    assert_eq!(schedule_summary(&path).unwrap(), json!([]));
+    let mut entries = vec![Value::Null];
+    entries.extend((0..14).map(|_| json!({"time":"06:00"})));
+    std::fs::write(&path, json!(entries).to_string()).unwrap();
+    let result = schedule_summary(&path).unwrap();
+    assert_eq!(result.as_array().unwrap().len(), 12);
+    assert_eq!(
+        result[0],
+        json!({"time":"06:00","plate":1,"duration":240,"days":null})
+    );
+    std::fs::write(&path, b"{").unwrap();
+    assert_eq!(schedule_summary(&path).unwrap(), json!([]));
+    std::fs::remove_file(path).unwrap();
 }
 #[test]
 fn invalid_configuration() {
@@ -543,4 +619,21 @@ fn invalid_configuration() {
     }
     assert!(validate_local_address("192.0.2.20", 0).is_err());
     validate_local_address("192.0.2.20", 1884).unwrap();
+}
+
+#[test]
+fn feed_has_no_invented_hardware_upper_bound() {
+    let huge: Value = serde_json::from_str("1000000000000000000000000000000").unwrap();
+    let payload = feed_payload(&huge, &huge, cloud().tz, now()).unwrap();
+    assert_eq!(payload["plans"][0]["plate"], huge);
+    assert_eq!(payload["plans"][0]["feedingDuration"], huge);
+    for number in ["1.0", "1e0", "-0"] {
+        assert!(feed_payload(
+            &serde_json::from_str::<Value>(number).unwrap(),
+            &json!(1),
+            cloud().tz,
+            now()
+        )
+        .is_err());
+    }
 }

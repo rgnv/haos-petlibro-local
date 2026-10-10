@@ -28,6 +28,7 @@ async fn main() -> Result<()> {
         local_port,
     );
     let schedule = env_or("POLAR_SCHEDULE", "/root/polar_schedule.json");
+    cloud.schedule_file = schedule.clone().into();
     let mut options = MqttOptions::new(
         "polar-local-cloud",
         env_or("POLAR_BROKER", "127.0.0.1"),

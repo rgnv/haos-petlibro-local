@@ -94,11 +94,11 @@ the takeover wizard runs `/root/polar-relay`. Existing environment files and
 schedule/credential paths remain compatible. Do not run Python and Rust copies
 of the same service together: their MQTT client IDs are intentionally identical.
 
-The Rust cloud also accepts `polar/cmd/set` with a flat attribute object, e.g.
-`{"volume":50,"enableSound":false}`. It sends `ATTR_SET_SERVICE` with generated
-`ts`/`msgId`; reserved envelope fields (`cmd`, `ts`, `msgId`, `linkId`, `code`) are
-rejected. Retained commands are ignored. This helper is new relative to the
-Python reference in this checkout.
+The Rust cloud accepts `polar/cmd/set` with the same allowlisted attribute shape
+as Python, e.g. `{"attr":"volume","value":50}`. It sends `ATTR_SET_SERVICE` with
+generated `ts`/`msgId`; `polar/cmd/bell` sends `ringerMode:"RING"`. Retained
+commands are ignored. Heartbeat status includes tracked attributes and up to 12
+schedule entries.
 
 See [RUST-PORT.md](RUST-PORT.md) for parity details, test coverage, and validation
 status. The Python files remain as reference implementations and support the
