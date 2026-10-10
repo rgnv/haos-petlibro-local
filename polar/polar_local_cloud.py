@@ -194,6 +194,8 @@ class PolarCloud:
         self.previous_minute = None
         self.config_due = None
         self.config_lock = threading.Lock()
+        self.last_heart = None      # monotonic ts of last HEARTBEAT
+        self.status_online = None   # last published online state
 
     # ---- inbound dispatch -------------------------------------------------
     def on_message(self, msg):
@@ -210,6 +212,20 @@ class PolarCloud:
         if not isinstance(cmd, str):
             return
         # ---- device posts ------------------------------------------------
+        if topic == f"{BASE}/heart/post" and cmd == "HEARTBEAT":
+            # Dashboard status feed: retained JSON on polar/status (bridged to HA).
+            self.last_heart = time.monotonic()
+            if self.status_online is not True:
+                self.status_online = True
+            self.pub("polar/status", {
+                "online": True,
+                "count": data.get("count"),
+                "rssi": data.get("rssi"),
+                "temperature": data.get("temperature"),
+                "device_ts": data.get("ts"),
+                "seen_at": int(time.time() * 1000),
+            }, retain=True)
+            return
         if topic == f"{BASE}/ntp/post" and cmd == "NTP":
             self.pub(f"{BASE}/ntp/sub", ntp_payload())
             return
@@ -239,11 +255,11 @@ class PolarCloud:
             self.pub(f"{BASE}/service/sub", config_sync_payload())
 
     # ---- helpers ----------------------------------------------------------
-    def pub(self, topic, payload):
+    def pub(self, topic, payload, retain=False):
         if not self.client.is_connected():
             log.warning("publish skipped while disconnected: %s", topic)
             return False
-        result = self.client.publish(topic, json.dumps(payload, separators=(",", ":")), qos=1)
+        result = self.client.publish(topic, json.dumps(payload, separators=(",", ":")), qos=1, retain=retain)
         if result.rc != 0:
             log.error("publish failed: topic=%s rc=%s", topic, result.rc)
         return result.rc == 0
@@ -280,6 +296,15 @@ class PolarCloud:
                     if self.config_due is not None and time.monotonic() >= self.config_due:
                         if self.pub(f"{BASE}/service/sub", config_sync_payload()):
                             self.config_due = None
+                # Offline detection: no heartbeat for 4 min -> retained offline status
+                if (self.last_heart is not None and self.status_online
+                        and time.monotonic() - self.last_heart > 240):
+                    self.status_online = False
+                    self.pub("polar/status", {
+                        "online": False,
+                        "seen_at": int((time.time() - (time.monotonic() - self.last_heart)) * 1000),
+                    }, retain=True)
+                    log.info("device silent >4min -> published offline status")
                 if time.monotonic() >= next_schedule:
                     next_schedule = time.monotonic() + 20
                     try:
