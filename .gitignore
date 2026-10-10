@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+capture.log
+*-capture.log
+*.local
+.env
+secrets*
+
+# Local configuration and raw captures
+*.env
+*.pcap
+*.pcapng
+polar_relay.log
+*creds*.json
+.review/

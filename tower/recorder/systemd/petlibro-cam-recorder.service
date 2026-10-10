@@ -1,0 +1,15 @@
+[Unit]
+Description=Petlibro Tower camera recorder (motion/feed clips)
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=CLIPS_DIR_PLACEHOLDER
+
+[Service]
+EnvironmentFile=/etc/default/petlibro-cam
+Type=simple
+ExecStart=/usr/bin/python3 /root/petlibro-cam-recorder.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

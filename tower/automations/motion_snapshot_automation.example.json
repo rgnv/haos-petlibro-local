@@ -1,0 +1,59 @@
+{
+  "alias": "your pet motion snapshot",
+  "description": "Tower feeder MOTION detection -> HA camera snapshot + phone/watch notification.",
+  "variables": {
+    "snapname": "feeder_{{ now().strftime('%Y%m%d_%H%M%S_%f') }}.jpg"
+  },
+  "trigger": [
+    {
+      "platform": "mqtt",
+      "topic": "dl/PLAF203/EXAMPLE_SERIAL/device/event/post"
+    }
+  ],
+  "condition": [
+    {
+      "condition": "template",
+      "value_template": "{{ '\"cmd\":\"DETECTION_EVENT\"' in (trigger.payload or '') and '\"type\":\"MOTION\"' in (trigger.payload or '') }}"
+    },
+    {
+      "condition": "template",
+      "value_template": "{{ this.attributes.last_triggered is not defined or this.attributes.last_triggered is none or (as_timestamp(now()) - as_timestamp(this.attributes.last_triggered, 0)) > 120 }}"
+    }
+  ],
+  "action": [
+    {
+      "service": "camera.snapshot",
+      "target": {
+        "entity_id": "camera.tower_feeder"
+      },
+      "data": {
+        "filename": "/media/{{ snapname }}"
+      }
+    },
+    {
+      "service": "notify.mobile_app_yourphone",
+      "data": {
+        "title": "🐱 your pet at the feeder",
+        "message": "Motion detected at the feeder — snapshot attached",
+        "data": {
+          "image": "/media/local/{{ snapname }}",
+          "priority": "high",
+          "ttl": 0,
+          "clickAction": "/tower-feeder/tower"
+        }
+      }
+    },
+    {
+      "service": "notify.mobile_app_yourwatch",
+      "data": {
+        "title": "🐱 your pet at the feeder",
+        "message": "Motion detected — snapshot attached",
+        "data": {
+          "image": "/media/local/{{ snapname }}",
+          "clickAction": "/tower-feeder/tower"
+        }
+      }
+    }
+  ],
+  "mode": "single"
+}

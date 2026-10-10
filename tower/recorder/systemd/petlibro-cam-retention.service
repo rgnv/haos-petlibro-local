@@ -1,0 +1,8 @@
+[Unit]
+Description=Petlibro camera clip retention (30 days)
+RequiresMountsFor=CLIPS_DIR_PLACEHOLDER
+
+[Service]
+EnvironmentFile=/etc/default/petlibro-cam
+Type=oneshot
+ExecStart=/usr/local/bin/petlibro-cam-retention.sh

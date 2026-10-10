@@ -1,0 +1,334 @@
+diff --git a/installer/bootstrap.py b/installer/bootstrap.py
+index fa8dbdc..32e65dc 100755
+--- a/installer/bootstrap.py
++++ b/installer/bootstrap.py
+@@ -655,7 +655,7 @@ def run(
+         assert mqtt.identity is not None
+         identity_path = _write_identity(config, mqtt.identity)
+         print(f"Captured credentials in protected file {identity_path}")
+-        wait_for(mqtt.device_start_ready, 180, "the feeder DEVICE_START_EVENT")
++        wait_for(mqtt.device_start_ready, 600, "the feeder DEVICE_START_EVENT")  # LOCAL: extended (slow 3.1.54 handshake)
+         target_version = _select_target_version(config, mqtt.software_version)
+         print(f"Observed stock firmware {mqtt.software_version}; OTA family value is {target_version}.")
+         _wait_for_final_broker(config, mqtt.identity, identity_path)
+diff --git a/installer/mqtt_server.py b/installer/mqtt_server.py
+index a4e29a5..e19b165 100644
+--- a/installer/mqtt_server.py
++++ b/installer/mqtt_server.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ import dataclasses
++import datetime
+ import json
+ import secrets
+ import socket
+@@ -73,6 +74,67 @@ def build_noncalibrating_ntp_response(now_ms: int) -> bytes:
+     ).encode("ascii")
+ 
+ 
++def build_ntp_sync_payload() -> bytes:
++    """NTP_SYNC push used by the bootstrap session (local patch).
++
++    The 3.1.54 stock firmware waits for this server-initiated push after it
++    subscribes to the device ntp channel, before it publishes DEVICE_START.
++    Mirrors the add-on's timezone serializer for America/Los_Angeles.
++    """
++    from zoneinfo import ZoneInfo
++
++    la = ZoneInfo("America/Los_Angeles")
++    now = datetime.datetime.now(datetime.timezone.utc)
++    current_off = int(now.astimezone(la).utcoffset().total_seconds())
++
++    def next_transition(start_utc: datetime.datetime, cur_off: int):
++        cursor = start_utc
++        for _ in range(366 * 3):
++            cand = cursor + datetime.timedelta(days=1)
++            if int(cand.astimezone(la).utcoffset().total_seconds()) != cur_off:
++                lo = int(cursor.timestamp())
++                hi = int(cand.timestamp())
++                while lo + 1 < hi:
++                    mid = (lo + hi) // 2
++                    mt = datetime.datetime.fromtimestamp(mid, datetime.timezone.utc)
++                    if int(mt.astimezone(la).utcoffset().total_seconds()) == cur_off:
++                        lo = mid
++                    else:
++                        hi = mid
++                new_off = int(
++                    datetime.datetime.fromtimestamp(hi, datetime.timezone.utc)
++                    .astimezone(la)
++                    .utcoffset()
++                    .total_seconds()
++                )
++                return hi * 1000, new_off
++            cursor = cand
++        return None
++
++    t1 = next_transition(now, current_off)
++    if t1 is None:
++        t2 = None
++    else:
++        t2 = next_transition(
++            datetime.datetime.fromtimestamp(t1[0] / 1000, datetime.timezone.utc)
++            + datetime.timedelta(seconds=1),
++            t1[1],
++        )
++
++    payload = {
++        "cmd": "NTP_SYNC",
++        "ts": int(time.time() * 1000),
++        "msgId": secrets.token_hex(16),
++        "timezoneOffsetSeconds": current_off,
++        "nextDSTOffsetSeconds": (t1[1] if t1 else current_off),
++        "nextDSTTransitionTs": (t1[0] if t1 else 0),
++        "secondNextDSTOffsetSeconds": (t2[1] if t2 else (t1[1] if t1 else current_off)),
++        "secondNextDSTTransitionTs": (t2[0] if t2 else 0),
++        "timezone": int(current_off // 3600),
++    }
++    return json.dumps(payload, separators=(",", ":")).encode("ascii")
++
++
+ def recv_packet(connection: socket.socket) -> bytes:
+     first = connection.recv(1)
+     if not first:
+@@ -146,6 +208,9 @@ class _Handler(socketserver.BaseRequestHandler):
+             if connection.username is None or connection.password is None:
+                 raise ProtocolError("feeder CONNECT did not include username and password")
+             session.connect = connection
++            # LOCAL FIX (keepalive): do not keep the 30s handshake timeout for
++            # the live session; honor the negotiated keepalive (2x, floor 120s).
++            self.request.settimeout(max(120, (connection.keep_alive or 90) * 2))
+             identity = CapturedIdentity(
+                 connection.client_id,
+                 connection.username,
+@@ -155,10 +220,29 @@ class _Handler(socketserver.BaseRequestHandler):
+             )
+             session.connection_generation = server._set_identity(identity)
+             session.send(build_connack())
++            # LOCAL PATCH4: serve FEEDING_PLAN_SERVICE immediately (3.1.54 gate)
++            try:
++                import uuid as _uuid, json as _json, time as _t
++                _topic = f"dl/PLAF203/{connection.client_id}/device/service/sub"
++                _payload = _json.dumps({
++                    "cmd": "FEEDING_PLAN_SERVICE",
++                    "ts": int(_t.time() * 1000),
++                    "msgId": str(_uuid.uuid4()),
++                    "plans": [],
++                }).encode("utf-8")   # PATCH6: publish() needs bytes
++                session.publish(_topic, _payload, qos=0)
++                server.report("Sent FEEDING_PLAN_SERVICE (empty plans) after CONNACK (local 3.1.54 patch)")
++                # Reference capture shows the cloud sends it TWICE in quick succession
++                import time as _t2
++                _t2.sleep(0.4)
++                session.publish(_topic, _payload, qos=0)
++                server.report("Sent second FEEDING_PLAN_SERVICE (mirrors cloud double-send)")
++            except Exception as _exc:
++                server.report(f"patch4 plan-service send failed: {_exc!r}")
+             protocol_name = "3.1" if connection.protocol_level == 3 else "3.1.1"
+             server.report(
+                 "Accepted feeder MQTT CONNECT and sent CONNACK "
+-                f"(protocol {protocol_name})"
++                f"(protocol {protocol_name}, keepalive {connection.keep_alive}s)"
+             )
+             server._set_session(session)
+             while True:
+@@ -167,13 +251,78 @@ class _Handler(socketserver.BaseRequestHandler):
+                     server.report("Feeder closed the bootstrap MQTT connection")
+                     return
+                 packet_type = packet[0] >> 4
++                if packet_type == 12:  # LOCAL PATCH4: PINGREQ -> PINGRESP
++                    session.send(bytes((0xD0, 0x00)))
++                    continue
++                if packet_type == 14:  # LOCAL PATCH4: graceful DISCONNECT
++                    server.report("Feeder sent MQTT DISCONNECT")
++                    return
+                 if packet_type == 3:
+                     publication = parse_publish(packet)
++                    # LOCAL PATCH9: reply to the feeder BINDING (system/post -> system/sub)
++                    try:
++                        if getattr(publication, "topic", "").endswith("/system/post"):
++                            import json as _json9, time as _t9
++                            _d9 = _json9.loads(publication.payload.decode("utf-8", "ignore"))
++                            if _d9.get("cmd") == "BINDING" and _d9.get("msgId"):
++                                _ts9 = int(_t9.time() * 1000)
++                                _rep9 = {"cmd": "BINDING", "msgId": _d9["msgId"], "code": 0, "ts": _ts9}
++                                _ser9 = publication.topic.split("/")[2]
++                                session.publish(f"dl/PLAF203/{_ser9}/device/system/sub",
++                                                _json9.dumps(_rep9).encode("utf-8"), qos=0)
++                                server.report("Replied to feeder BINDING on system/sub (local patch9)")
++                    except Exception as _exc9:
++                        server.report(f"patch9 binding-reply failed: {_exc9!r}")
++                    # LOCAL PATCH8: on the NTP_SYNC ack, proactively send the NTP answer
++                    try:
++                        if getattr(publication, "topic", "").endswith("/ntp/post"):
++                            import json as _json8, time as _t8
++                            _d8 = _json8.loads(publication.payload.decode("utf-8", "ignore"))
++                            if _d8.get("cmd") == "NTP_SYNC" and "code" in _d8:
++                                _ts8 = int(_t8.time() * 1000)
++                                _ans8 = {"cmd": "NTP", "ts": _ts8, "code": 0, "calibrationTag": False}
++                                _ans8.update(_p4_tz_payload(_ts8))
++                                _ser8 = publication.topic.split("/")[2]
++                                session.publish(f"dl/PLAF203/{_ser8}/device/ntp/sub",
++                                                _json8.dumps(_ans8).encode("utf-8"), qos=0)
++                                server.report("Sent proactive NTP answer after NTP_SYNC ack (local patch8)")
++                    except Exception as _exc8:
++                        server.report(f"patch8 ntp-answer send failed: {_exc8!r}")
++                    # LOCAL PATCH7: on the plan-service ack, send NTP_SYNC (cloud order)
++                    try:
++                        if getattr(publication, "topic", "").endswith("/service/post"):
++                            import json as _json7
++                            _d7 = _json7.loads(publication.payload.decode("utf-8", "ignore"))
++                            if _d7.get("cmd") == "FEEDING_PLAN_SERVICE" and "code" in _d7:
++                                _serial7 = publication.topic.split("/")[2]
++                                _t7 = f"dl/PLAF203/{_serial7}/device/ntp/sub"
++                                session.publish(_t7, build_ntp_sync_payload(), qos=0)
++                                server.report("Sent NTP_SYNC push AFTER plan-ack (order fix, local 3.1.54 patch)")
++                    except Exception as _exc7:
++                        server.report(f"patch7 order-fix send failed: {_exc7!r}")
++                    # LOCAL PATCH4: answer the feeder NTP clock-check request
++                    try:
++                        import json as _json, time as _t
++                        if publication.topic.endswith("/ntp/post"):
++                            _data = _json.loads(publication.payload.decode("utf-8", "ignore"))
++                            if _data.get("cmd") == "NTP":
++                                _ts = int(_t.time() * 1000)
++                                _answer = {"cmd": "NTP", "ts": _ts, "code": 0, "calibrationTag": False}
++                                _answer.update(_p4_tz_payload(_ts))
++                                _serial = publication.topic.split("/")[2]
++                                session.publish(f"dl/PLAF203/{_serial}/device/ntp/sub", _json.dumps(_answer).encode("utf-8"), qos=0)  # PATCH6
++                                server.report("Answered feeder NTP request on ntp/sub (local 3.1.54 patch)")
++                    except Exception as _exc:
++                        server.report(f"patch4 ntp-answer failed: {_exc!r}")
+                     server._record_publication(session, publication.topic, publication.payload)
+                     if publication.qos == 1 and publication.packet_id is not None:
+                         session.send(build_puback(publication.packet_id))
+                 elif packet_type == 8:
+                     subscription = parse_subscribe(packet)
++                    server.report(
++                        f"Feeder SUBSCRIBE id {subscription.packet_id}: "
++                        + ", ".join(topic for topic, _ in subscription.topics)
++                    )
+                     session.subscriptions.update(topic for topic, _ in subscription.topics)
+                     session.send(
+                         build_suback(
+@@ -282,6 +431,24 @@ class BootstrapMqttServer(socketserver.ThreadingTCPServer):
+         if any(topic.endswith("/device/ota/sub") for topic in session.subscriptions):
+             self.ota_subscription_ready.set()
+ 
++        ntp_topics = sorted(
++            topic for topic in session.subscriptions if topic.endswith("/device/ntp/sub")
++        )
++        for topic in ntp_topics:
++            generation = getattr(session, "connection_generation", None)
++            sent = getattr(self, "_ntp_sync_generations", None)
++            if sent is None:
++                sent = set()
++                self._ntp_sync_generations = sent
++            if generation in sent:
++                continue
++            try:
++                pass  # LOCAL PATCH7: NTP_SYNC deferred to plan-ack trigger (order fix)
++                sent.add(generation)
++                # LOCAL PATCH8: send+retry handled by the plan-ack trigger (patch7)
++            except Exception as err:  # noqa: BLE001
++                self.report(f"NTP_SYNC push failed on {topic}: {err}")
++
+         with self._lock:
+             ready = [
+                 (topic, payload)
+@@ -296,6 +463,17 @@ class BootstrapMqttServer(socketserver.ThreadingTCPServer):
+         for topic, payload in ready:
+             self._publish_application_response(session, topic, payload)
+ 
++    def _retry_ntp_sync(self, session: BootstrapSession, topic: str, generation: int) -> None:
++        with self._lock:
++            acked = getattr(self, "_ntp_sync_acked_generation", None)
++            if acked == generation or self.session is not session:
++                return
++        try:
++            session.publish(topic, build_ntp_sync_payload(), qos=0)
++            self.report(f"Re-sent NTP_SYNC push on {topic} (no ack within 15s)")
++        except Exception as err:  # noqa: BLE001
++            self.report(f"NTP_SYNC re-send failed: {err}")
++
+     def _record_publication(
+         self, session: BootstrapSession, topic: str, payload: bytes
+     ) -> None:
+@@ -312,6 +490,12 @@ class BootstrapMqttServer(socketserver.ThreadingTCPServer):
+         command = value.get("cmd")
+         if isinstance(command, str):
+             self.report(f"Feeder published {command} on {topic}")
++        if topic.endswith("/device/ntp/post") and command == "NTP_SYNC":
++            if value.get("code") == 0:
++                self._ntp_sync_acked_generation = getattr(
++                    session, "connection_generation", None
++                )
++                self.report("NTP_SYNC acknowledged by the feeder (code 0)")
+         if topic.endswith("/device/ntp/post") and command == "NTP":
+             response_topic = topic[:-4] + "sub"
+             self._queue_or_publish_application_response(
+@@ -449,6 +633,64 @@ class BootstrapMqttServer(socketserver.ThreadingTCPServer):
+         return topic
+ 
+ 
++# ─── LOCAL PATCH4 (3.1.54): tz payload for NTP answers ──────────────────────
++def _p4_tz_payload(ts_ms):
++    """Timezone/DST payload matching the reference NTP answer semantics."""
++    from datetime import datetime, timedelta, timezone as _tz
++    try:
++        from zoneinfo import ZoneInfo
++        try:
++            with open("/etc/timezone") as _f:
++                tzname = _f.read().strip() or "America/Los_Angeles"
++        except Exception:
++            tzname = "America/Los_Angeles"
++        tz = ZoneInfo(tzname)
++    except Exception:
++        tz = None
++
++    now = datetime.fromtimestamp(ts_ms / 1000.0, tz) if tz else datetime.fromtimestamp(ts_ms / 1000.0).astimezone()
++
++    def _offset_at(dt):
++        return dt.utcoffset() or timedelta()
++
++    cur = _offset_at(now)
++
++    transitions = []
++    probe = now.replace(minute=0, second=0, microsecond=0)
++    state = bool(probe.dst())
++    for _ in range(9000):  # ~12.5 months of hours
++        nxt = probe + timedelta(hours=1)
++        if bool(nxt.dst()) != state:
++            lo, hi = probe, nxt
++            for _ in range(10):
++                mid = lo + (hi - lo) / 2
++                if bool(mid.dst()) == state:
++                    lo = mid
++                else:
++                    hi = mid
++            transitions.append(hi)
++            state = bool(hi.dst())
++            if len(transitions) == 2:
++                break
++        probe = nxt
++
++    def _epoch_ms(dt):
++        return int(dt.timestamp() * 1000)
++
++    t1 = transitions[0] if transitions else None
++    t2 = transitions[1] if len(transitions) > 1 else None
++    off1 = _offset_at(t1 + timedelta(hours=1)) if t1 else cur
++    off2 = _offset_at(t2 + timedelta(hours=1)) if t2 else cur
++
++    return {
++        "timezoneOffsetSeconds": int(cur.total_seconds()),
++        "nextDSTOffsetSeconds": int(off1.total_seconds()),
++        "nextDSTTransitionTs": _epoch_ms(t1) if t1 else 0,
++        "secondNextDSTOffsetSeconds": int(off2.total_seconds()),
++        "secondNextDSTTransitionTs": _epoch_ms(t2) if t2 else 0,
++        "timezone": int(cur.total_seconds() // 3600),
++    }
++
+ def wait_for(event: threading.Event, timeout: float, description: str) -> None:
+     if not event.wait(timeout):
+         raise TimeoutError(f"timed out waiting for {description}")

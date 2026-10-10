@@ -1,0 +1,15 @@
+[Unit]
+Description=Polar feeder local cloud service
+After=network-online.target mosquitto.service
+Wants=network-online.target
+Requires=mosquitto.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/polar
+ExecStart=/usr/bin/python3 /root/polar_local_cloud.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
