@@ -35,6 +35,14 @@ TZ = ZoneInfo(os.environ.get("POLAR_TIMEZONE", "UTC"))
 SCHEDULE_FILE = os.environ.get("POLAR_SCHEDULE", "/root/polar_schedule.json")
 MANUAL_PLAN_ID = 666666666  # magic manual-feed slot the device uses
 
+# Remote-settable attributes (allowlist). Deliberately excludes motor/stall
+# calibration values; these are the user-facing comfort settings.
+SETTABLE_ATTRS = {
+    "lightSwitch", "enableLight", "enableSound", "soundSwitch", "volume",
+    "ringerMode", "ringerInterval", "ringerDuration", "closeDoorTime",
+    "doorCheckSignalTime", "doorNotcheckSignalTime",
+}
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("polar-cloud")
@@ -196,6 +204,8 @@ class PolarCloud:
         self.config_lock = threading.Lock()
         self.last_heart = None      # monotonic ts of last HEARTBEAT
         self.status_online = None   # last published online state
+        # attributes we permit setting remotely (safety allowlist) + tracked state
+        self.attrs = {}
 
     # ---- inbound dispatch -------------------------------------------------
     def on_message(self, msg):
@@ -224,12 +234,18 @@ class PolarCloud:
                 "temperature": data.get("temperature"),
                 "device_ts": data.get("ts"),
                 "seen_at": int(time.time() * 1000),
+                "attrs": self.attrs,
+                "schedule": self.schedule_summary(),
             }, retain=True)
             return
         if topic == f"{BASE}/ntp/post" and cmd == "NTP":
             self.pub(f"{BASE}/ntp/sub", ntp_payload())
             return
         if topic == f"{BASE}/event/post":
+            if cmd == "ATTR_PUSH_EVENT":
+                for k, v in data.items():
+                    if k in SETTABLE_ATTRS:
+                        self.attrs[k] = v
             echo = echo_payload(topic, data)
             if echo is not None:
                 self.pub(f"{BASE}/event/sub", echo)
@@ -253,6 +269,23 @@ class PolarCloud:
             self.pub(f"{BASE}/service/sub", payload)
         elif topic == "polar/cmd/config":
             self.pub(f"{BASE}/service/sub", config_sync_payload())
+        elif topic == "polar/cmd/set":
+            attr, value = data.get("attr"), data.get("value")
+            if not isinstance(attr, str) or attr not in SETTABLE_ATTRS or value is None:
+                log.warning("invalid or disallowed set: %r", data)
+                return
+            self.attrs[attr] = value
+            self.pub(f"{BASE}/service/sub", {
+                "cmd": "ATTR_SET_SERVICE", "ts": int(time.time() * 1000),
+                "msgId": "set-" + uuid.uuid4().hex[:8], attr: value,
+            })
+            log.info("local attr set: %s=%r", attr, value)
+        elif topic == "polar/cmd/bell":
+            self.pub(f"{BASE}/service/sub", {
+                "cmd": "ATTR_SET_SERVICE", "ts": int(time.time() * 1000),
+                "msgId": "bell-" + uuid.uuid4().hex[:8], "ringerMode": "RING",
+            })
+            log.info("local bell ring")
 
     # ---- helpers ----------------------------------------------------------
     def pub(self, topic, payload, retain=False):
@@ -287,6 +320,17 @@ class PolarCloud:
             self.previous_minute = int(now.timestamp()) // 60
         cutoff = now.timestamp() - 3 * 86400
         self.last_fired = {k: v for k, v in self.last_fired.items() if v > cutoff}
+
+    def schedule_summary(self):
+        """Compact view of the local schedule for the dashboard."""
+        try:
+            with open(SCHEDULE_FILE) as f:
+                entries = json.load(f)
+            return [{"time": e.get("time"), "plate": e.get("plate", 1),
+                     "duration": e.get("duration", 240), "days": e.get("days")}
+                    for e in entries if isinstance(e, dict)][:12]
+        except (FileNotFoundError, ValueError):
+            return []
 
     def sched_loop(self):
         next_schedule = 0
