@@ -39,7 +39,7 @@ MANUAL_PLAN_ID = 666666666  # magic manual-feed slot the device uses
 # calibration values; these are the user-facing comfort settings.
 SETTABLE_ATTRS = {
     "lightSwitch", "enableLight", "enableSound", "soundSwitch", "volume",
-    "ringerMode", "ringerInterval", "ringerDuration", "closeDoorTime",
+    "ringerMode", "ringerInterval", "ringerDuration", "closeDoorTime", "platePosition",
     "doorCheckSignalTime", "doorNotcheckSignalTime",
 }
 

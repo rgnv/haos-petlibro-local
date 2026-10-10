@@ -67,7 +67,7 @@ class ReleaseTests(unittest.TestCase):
             script = script.replace('/etc/', str(work / 'etc') + '/').replace('/root/', str(work / 'root') + '/')
             installer = work / 'install.sh'
             installer.write_text(script)
-            for name in ('mosquitto', 'mosquitto_pub', 'mosquitto_sub', 'socat', 'systemctl', 'sleep'):
+            for name in ('mosquitto', 'mosquitto_pub', 'mosquitto_sub', 'socat', 'systemctl', 'sleep', 'polar-local-cloud', 'polar-relay'):
                 executable = work / 'bin' / name
                 executable.write_text('#!/bin/sh\nexit 0\n')
                 executable.chmod(0o755)
@@ -84,7 +84,7 @@ class ReleaseTests(unittest.TestCase):
                 executable.chmod(0o755)
             subprocess.run(['bash', str(installer), '--serial', 'TESTSERIAL', '--broker-ip',
                             '192.0.2.20', '--port', '2884', '--timezone', 'UTC'],
-                           env=dict(os.environ, PATH=str(work / 'bin') + ':' + os.environ['PATH']),
+                           env=dict(os.environ, PETLIBRO_RUST_BIN_DIR=str(work / 'bin'), PATH=str(work / 'bin') + ':' + os.environ['PATH']),
                            check=True, capture_output=True, timeout=10)
             config = (work / 'etc/default/polar').read_text()
             self.assertIn('POLAR_PORT=2884\n', config)
@@ -101,9 +101,10 @@ class ReleaseTests(unittest.TestCase):
             config = work / 'polar.env'
             config.write_text('POLAR_SERIAL=TESTSERIAL\nPOLAR_PORT=2884\nPOLAR_LOCAL_HOST=192.0.2.20\n')
             wizard = work / 'wizard.sh'
-            wizard.write_text((ROOT / 'scripts/polar-takeover.sh').read_text().replace('/etc/default/polar', str(config)))
+            wizard.write_text((ROOT / 'scripts/polar-takeover.sh').read_text().replace('/etc/default/polar', str(config)).replace('/root/polar-relay', str(work / 'polar-relay')))
             for name, body in {'id': 'echo 0', 'sleep': 'exit 0', 'systemctl': 'exit 0',
                                'timeout': 'shift; exec "$@"', 'mosquitto_sub': 'echo "$@"',
+                               'polar-relay': 'echo "$POLAR_SERIAL $POLAR_LOCAL_HOST $POLAR_PORT $*"',
                                'python3': 'echo "$POLAR_SERIAL $POLAR_LOCAL_HOST $POLAR_PORT $*"'}.items():
                 tool = work / name
                 tool.write_text('#!/bin/sh\n' + body + '\n')

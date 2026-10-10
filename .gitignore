@@ -13,3 +13,6 @@ secrets*
 polar_relay.log
 *creds*.json
 .review/
+
+# Rust build artifacts
+**/target/

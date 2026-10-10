@@ -24,9 +24,12 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 [[ "$PETLIBRO_STREAM" != *YOUR_* && "$PETLIBRO_STREAM" != *EXAMPLE* ]] || { echo "ERROR: replace RTSP URL placeholders"; exit 2; }
 [ ! -L "$CLIPS_DIR" ] || { echo "ERROR: clips directory cannot be a symlink"; exit 2; }
 
+RUST_BIN_DIR="${PETLIBRO_RUST_BIN_DIR:-$REPO_ROOT/polar-rs/target/release}"
+[ -x "$RUST_BIN_DIR/petlibro-cam-recorder" ] || {
+  echo "ERROR: missing Rust recorder; build Rust workspace first (see README)"; exit 1;
+}
 echo "==> Checking dependencies..."
 command -v ffmpeg >/dev/null || { apt-get update -qq && apt-get install -y -qq ffmpeg; }
-python3 -c "from paho.mqtt.client import CallbackAPIVersion" 2>/dev/null || python3 -m pip install --break-system-packages 'paho-mqtt>=2,<3' || python3 -m pip install 'paho-mqtt>=2,<3'
 
 # --- credentials ---------------------------------------------------------------
 CREDS=/root/petlibro-cam-creds.json
@@ -57,7 +60,7 @@ echo "==> Credentials stored at $CREDS (mode 600)."
 mkdir -p "$CLIPS_DIR"
 
 # --- deploy --------------------------------------------------------------------
-install -m 0755 "$REPO_ROOT/tower/recorder/petlibro-cam-recorder.py" /root/petlibro-cam-recorder.py
+install -m 0755 "$RUST_BIN_DIR/petlibro-cam-recorder" /root/petlibro-cam-recorder
 install -m 0755 "$REPO_ROOT/tower/recorder/petlibro-cam-retention.sh" /usr/local/bin/petlibro-cam-retention.sh
 
 # substitute placeholders in units + scripts

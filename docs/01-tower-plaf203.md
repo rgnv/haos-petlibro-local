@@ -118,7 +118,7 @@ sudo env PETLIBRO_SERIAL=EXAMPLE_SERIAL PETLIBRO_STREAM=rtsp://YOUR_CAMERA_HOST:
   bash scripts/install-tower-recorder.sh <path-to-clips-dir> YOUR_BROKER_HOST
 ```
 
-Deploys `petlibro-cam-recorder.py` (systemd `petlibro-cam-recorder`) — it listens
+Build the Rust workspace first (see README). Deploys `petlibro-cam-recorder` (systemd `petlibro-cam-recorder`) — it listens
 on your broker for motion/feeding events and records 3-minute H.264 clips with
 ffmpeg from the camera's RTSP stream, into `<dir>/YYYY-MM-DD/`. Retention:
 `petlibro-cam-retention.sh` (+ daily timer) deletes clips older than 30 days (GNU find `-mtime +30`: at least 31 complete days).

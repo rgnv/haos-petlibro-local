@@ -164,7 +164,7 @@ relay() {
   local upstream="${1:-mqtt.us.petlibro.com}"
   systemctl stop polar-local-cloud mosquitto
   echo "==> Foreground relay; Ctrl-C to stop, then run serve. Log contains credentials (0600)."
-  POLAR_UPSTREAM="$upstream" python3 /root/polar_relay.py
+  POLAR_UPSTREAM="$upstream" /root/polar-relay
 }
 
 cmd="${1:-help}"; shift || true

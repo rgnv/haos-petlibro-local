@@ -1,0 +1,18 @@
+[workspace]
+members = ["polar-cloud", "polar-relay", "tower-recorder"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = "0.4"
+chrono-tz = "0.10"
+libc = "0.2"
+rumqttc = { version = "0.25", default-features = false }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "process", "sync"] }
+uuid = { version = "1", features = ["v4"] }

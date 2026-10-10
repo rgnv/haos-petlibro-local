@@ -7,7 +7,7 @@ RequiresMountsFor=CLIPS_DIR_PLACEHOLDER
 [Service]
 EnvironmentFile=/etc/default/petlibro-cam
 Type=simple
-ExecStart=/usr/bin/python3 /root/petlibro-cam-recorder.py
+ExecStart=/root/petlibro-cam-recorder
 Restart=always
 RestartSec=10
 

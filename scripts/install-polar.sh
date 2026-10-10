@@ -39,6 +39,12 @@ ZoneInfo(sys.argv[4])
 if not all(c.isalnum() or c in '/_+-' for c in sys.argv[4]):
     raise ValueError("unsupported timezone spelling")
 PYTHON
+RUST_BIN_DIR="${PETLIBRO_RUST_BIN_DIR:-$REPO_ROOT/polar-rs/target/release}"
+for binary in polar-local-cloud polar-relay; do
+  [ -x "$RUST_BIN_DIR/$binary" ] || {
+    echo "ERROR: missing $RUST_BIN_DIR/$binary; build Rust workspace first (see README)"; exit 1;
+  }
+done
 echo "==> Using broker address: $BROKER_IP:$PORT"
 
 # --- 1. dependencies -----------------------------------------------------------
@@ -46,10 +52,6 @@ if ! command -v mosquitto >/dev/null || ! command -v mosquitto_pub >/dev/null ||
   apt-get update -qq
   apt-get install -y -qq mosquitto mosquitto-clients socat
 fi
-if ! python3 -c 'from paho.mqtt.client import CallbackAPIVersion' 2>/dev/null; then
-  python3 -m pip install --break-system-packages 'paho-mqtt>=2,<3' || python3 -m pip install 'paho-mqtt>=2,<3'
-fi
-python3 -c 'from paho.mqtt.client import CallbackAPIVersion'
 for tool in mosquitto mosquitto_pub mosquitto_sub socat setsid; do command -v "$tool" >/dev/null; done
 
 # --- 2. broker listener on PORT ------------------------------------------------
@@ -68,7 +70,8 @@ echo "==> mosquitto active on $PORT"
 
 # --- 3. deploy the service files ----------------------------------------------
 install -m 0755 "$REPO_ROOT/polar/polar_local_cloud.py" /root/polar_local_cloud.py
-install -m 0755 "$REPO_ROOT/polar/polar_relay.py"       /root/polar_relay.py
+install -m 0755 "$RUST_BIN_DIR/polar-local-cloud" /root/polar-local-cloud
+install -m 0755 "$RUST_BIN_DIR/polar-relay" /root/polar-relay
 install -m 0755 "$REPO_ROOT/polar/polar_make_local.py"  /root/polar_make_local.py
 install -m 0755 "$REPO_ROOT/polar/polar_local_feed.py"  /root/polar_local_feed.py
 

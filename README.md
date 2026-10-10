@@ -29,10 +29,11 @@ configuration; read the guides and REVIEW.md before deploying.
 
 ### 🐾 Polar wet feeder — full local takeover
 
-**You need:** the feeder on your WiFi, a Debian/Ubuntu Linux host with systemd and Python 3.9+
+**You need:** the feeder on your WiFi, a Debian/Ubuntu Linux host with systemd and Python 3.9+ for setup helpers, plus the prebuilt Rust binaries below
 (any always-on machine — a Proxmox host, a Pi, a VM), and ~30 minutes.
 
 ```bash
+# First build/copy the Rust binaries (see build section below).
 # On your always-on Linux box (host that will run the local broker):
 sudo bash scripts/install-polar.sh --serial EXAMPLE_SERIAL --broker-ip 192.168.x.x --timezone UTC
 
@@ -67,6 +68,42 @@ Full walkthrough: **docs/01-tower-plaf203.md**
 
 ---
 
+## Build standalone Rust services
+
+`polar-rs/` is a Cargo workspace with three binaries: `polar-local-cloud`,
+`petlibro-cam-recorder`, and `polar-relay`. Build on a Linux machine with a current
+stable Rust toolchain; deployment hosts need the matching binaries, not Rust.
+The recorder also needs `ffmpeg`. HAOS addon code stays Python.
+
+```bash
+cargo build --manifest-path polar-rs/Cargo.toml --workspace --release --offline
+cargo test --manifest-path polar-rs/Cargo.toml --workspace --offline
+```
+
+Offline builds require a populated Cargo dependency cache (including `rumqttc`).
+On a build machine where downloads are allowed, omit `--offline` for the initial
+build. Copy all three binaries from `polar-rs/target/release/` to the deployment
+host, built for its CPU architecture and libc. Rust timezone rules are embedded
+via `chrono-tz`; rebuild with updated dependency data when timezone laws change.
+
+The shell installers now require these prebuilt binaries before changing the
+host. By default they read `polar-rs/target/release/`; set
+`PETLIBRO_RUST_BIN_DIR=/absolute/path/to/binaries` to use a copied build. Their
+systemd units run `/root/polar-local-cloud` and `/root/petlibro-cam-recorder`;
+the takeover wizard runs `/root/polar-relay`. Existing environment files and
+schedule/credential paths remain compatible. Do not run Python and Rust copies
+of the same service together: their MQTT client IDs are intentionally identical.
+
+The Rust cloud also accepts `polar/cmd/set` with a flat attribute object, e.g.
+`{"volume":50,"enableSound":false}`. It sends `ATTR_SET_SERVICE` with generated
+`ts`/`msgId`; reserved envelope fields (`cmd`, `ts`, `msgId`, `linkId`, `code`) are
+rejected. Retained commands are ignored. This helper is new relative to the
+Python reference in this checkout.
+
+See [RUST-PORT.md](RUST-PORT.md) for parity details, test coverage, and validation
+status. The Python files remain as reference implementations and support the
+existing one-shot Python helpers; installers run the Rust services.
+
 ## 📁 Repo map
 
 ```
@@ -91,7 +128,12 @@ tower/
 ├── dashboard/         Lovelace dashboard builder
 └── 99-tower-ha-bridge.conf   MQTT bridge config (split-broker setups)
 
-polar/
+polar-rs/              standalone Rust services (Cargo workspace)
+├── polar-cloud/       Polar local MQTT cloud
+├── tower-recorder/    Tower MQTT-triggered ffmpeg recorder
+└── polar-relay/       transparent TCP capture relay
+
+polar/                Python references + one-shot helpers
 ├── polar_relay.py     transparent relay: device → you → vendor cloud (protocol capture)
 ├── polar_make_local.py  one-shot: pin the device's broker to YOUR address (permanent)
 ├── polar_local_feed.py  CLI: feed now (plate + duration)

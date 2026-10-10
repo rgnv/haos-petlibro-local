@@ -172,3 +172,7 @@ or configure an explicit local redirect. A mirrored capture alone does not route
 the device to your broker and cannot make a local publish reach a device still
 connected to the vendor. Avoid global DNS overrides affecting other devices or
 the relay's upstream resolution.
+
+Standalone service and relay now use prebuilt Rust binaries. Build/copy them as
+described in [README](../README.md#build-standalone-rust-services) before running
+the shell installer. One-shot Python feed/pin helpers remain supported.
