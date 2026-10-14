@@ -29,8 +29,9 @@ sudo bash scripts/install-polar.sh --serial EXAMPLE_SERIAL \
 
 Optional `--port 1884` selects the local listener (default 1884). The installer
 installs Mosquitto, its client tools, socat and paho-mqtt 2.x; writes
-`/etc/mosquitto/conf.d/polar-capture.conf`; deploys the four Python scripts to
-`/root/`; writes `/etc/default/polar` (0600); and enables Mosquitto and
+`/etc/mosquitto/conf.d/polar-capture.conf`; deploys the Rust service binaries
+and the Python helper/reference scripts to `/root/`; writes `/etc/default/polar`
+(0600); and enables Mosquitto and
 `polar-local-cloud.service`. Failures stop installation. Inspect failures with
 `journalctl -u polar-local-cloud -u mosquitto`.
 
@@ -39,7 +40,7 @@ The service and takeover wizard use `/etc/default/polar`:
 | Variable | Meaning |
 |---|---|
 | `POLAR_SERIAL` | Actual feeder serial |
-| `POLAR_BROKER`, `POLAR_PORT` | Broker reached by Python helpers/service (127.0.0.1 and chosen port) |
+| `POLAR_BROKER`, `POLAR_PORT` | Broker reached by the service and Python helpers (127.0.0.1 and chosen port) |
 | `POLAR_LOCAL_HOST`, `POLAR_LOCAL_PORT` | Address stored in the feeder (LAN IPv4 and chosen port) |
 | `POLAR_TIMEZONE` | IANA timezone; default UTC |
 | `POLAR_SCHEDULE` | Optional schedule path; default `/root/polar_schedule.json` |

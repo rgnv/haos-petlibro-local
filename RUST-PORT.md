@@ -1,8 +1,9 @@
 # Standalone Rust service port
 
 `polar-rs/` contains three member crates. Installers remain shell and consume
-prebuilt binaries; the deployment host does not need a Rust toolchain. No live
-service, broker, feeder, camera, or deployment was contacted during this port.
+prebuilt binaries; the deployment host does not need a Rust toolchain. The port
+itself contacted no live service, broker, feeder, or camera; the deployment to a
+live host happened afterwards and was smoke-tested — see Verification.
 
 | Python reference | Rust crate / binary | Runtime |
 |---|---|---|
@@ -104,16 +105,24 @@ symlink rejection, relay bytes formatting, bidirectional forwarding and closure.
 Relay tests use Tokio in-memory duplex streams; recorder tests use local stub
 executables and temporary files, never a camera or broker.
 
-Full workspace validation is currently blocked: `cargo build --workspace --offline`
-fails because `rumqttc` is absent from the local Cargo cache. The task prohibits
-network access. A local dependency cache or explicit dependency-download permission
-is required before the full build/test acceptance criterion can be met. No build
-success or live/hardware parity is claimed while this blocker remains.
+Full workspace validation passes on cargo 1.98.1: `cargo build --release
+--workspace`, `cargo test --workspace` (34/34 — 26 cloud, 4 relay, 4 recorder),
+and zero clippy warnings; `Cargo.lock` is committed for reproducible builds. The
+Rust control surface matches the Python reference through commit `d4760de`,
+including its concurrent allowlist update. An earlier review environment could
+only run partial offline checks (29 Python protocol tests, 9 release tests, and
+the dependency-free Rust subsets under `.review/rust-offline/`); the full build
+and suite were run afterwards on a machine with dependency access.
 
-Offline partial verification passed: 29 Python protocol tests, 9 release tests,
-26 Rust cloud tests, 4 relay tests, and 4 recorder tests. Rust partial
-checks used ignored temporary manifests under `.review/rust-offline/` to exclude
-the unavailable MQTT dependency; the recorder copy excluded its MQTT main loop.
-They are not substitutes for building/testing the real workspace. Formatting
-and shell syntax checks also passed. The Rust control surface matches the Python
-reference through commit `d4760de`, including its concurrent allowlist update.
+Live deployment smoke test (Debian 13 x86_64, glibc 2.41 reference host):
+binaries installed through `scripts/install-polar.sh` and
+`scripts/install-tower-recorder.sh`. Verified on live hardware: broker connect
+with subscriptions to device topics and `polar/cmd/#`; retained `polar/status`
+publishing with tracked attributes; device heartbeat handling; a full
+`polar/cmd/set` round trip (ATTR_SET_SERVICE → device `code:0` acknowledgement
+and `ATTR_PUSH_EVENT` carrying the command's `msgId` → echo); and the recorder
+finalizing a ~180 s 1080p h264 clip from a live MQTT motion event (`.part`
+growth → atomic rename). The relay remains a capture-time tool, not a service.
+Remaining limits: smoke coverage is for that reference host; other hosts and
+firmware revisions need their own verification, and the broker-security and
+physical-execution caveats in REVIEW.md are unchanged.
