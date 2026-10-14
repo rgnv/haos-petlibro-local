@@ -98,7 +98,7 @@ so we bridge it to HA:
    admin token), `HA_URL` (e.g. `http://homeassistant.local:8123`), and
    `PETLIBRO_SERIAL` (actual serial), then run
    `python3 tower/automations/make_motion_automation.py`. It creates/updates
-   `feeder_motion_snapshot`, with a 120 s cooldown and tap target
+   `feeder_motion_snapshot`, with a 300 s cooldown and tap target
    `/tower-feeder/tower`. Reload automations in HA if needed.
 3. Test: publish a fake motion payload
    `{"cmd":"DETECTION_EVENT","type":"MOTION","ts":<ms>}` to
@@ -107,7 +107,10 @@ so we bridge it to HA:
 > Gotchas baked into the builder: the condition must string-match **compact JSON**
 > (spaced test payloads fail silently), `camera.snapshot` needs an explicit
 > `target.entity_id`, and the `payload_json` form doesn't evaluate on some HA
-> versions — the builder uses the proven form.
+> versions — the builder uses the proven form. The 300 s cooldown runs off
+> `last_triggered` of successful runs (blocked triggers don't reset the window) —
+> the feeder re-fires MOTION ~2-2.5 min after the first event, so a 120 s window
+> leaks a duplicate notification.
 
 ## Part 4 — 30-day local video recording (optional, second host)
 

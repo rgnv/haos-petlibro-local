@@ -17,7 +17,7 @@
     },
     {
       "condition": "template",
-      "value_template": "{{ this.attributes.last_triggered is not defined or this.attributes.last_triggered is none or (as_timestamp(now()) - as_timestamp(this.attributes.last_triggered, 0)) > 120 }}"
+      "value_template": "{{ this.attributes.last_triggered is not defined or this.attributes.last_triggered is none or (as_timestamp(now()) - as_timestamp(this.attributes.last_triggered, 0)) > 300 }}"
     }
   ],
   "action": [
