@@ -130,7 +130,84 @@ created yourself. A vendor cloud integration stops updating once the feeder is
 local — its entities freeze at the last cloud value, so disable (or ignore) them
 rather than mixing them with the local ones.
 
-## 4. Automation example — feed every morning at 06:00
+## 4. Schedules and per-plate custom timings (recommended)
+
+The service owns the schedule and exposes it over MQTT (`polar/cmd/schedule`,
+retained state on `polar/schedule`). Ready-made HA helpers and scripts build a
+full authoring UI on top of it:
+
+```bash
+# HA config dir (e.g. /mnt/data/supervisor/homeassistant on HAOS)
+cp polar/ha/polar_local.yaml    "$HA_CONFIG/packages/polar_local.yaml"
+cat polar/ha/polar_scripts.yaml >> "$HA_CONFIG/scripts.yaml"
+```
+
+Then reload without a restart — Developer tools → Actions:
+
+```
+input_boolean.reload, input_datetime.reload, input_number.reload,
+input_select.reload, script.reload
+```
+
+You get:
+
+* `input_number.polar_feed_duration` + `script.polar_feed_plate_1|2|3` — feed any
+  plate for a custom door-open time;
+* a form (`input_datetime.polar_schedule_time`,
+  `input_select.polar_schedule_plate`, `input_number.polar_schedule_duration`,
+  seven weekday toggles) and `script.polar_schedule_add`;
+* `script.polar_schedule_enable|disable|remove|clear` with
+  `input_number.polar_schedule_entry` to pick the entry number;
+* `sensor.polar_wet_food_feeder_scheduled_feeds` — count, with the entries list in
+  its `entries` attribute (rendered by a markdown card).
+
+Card config for the editor and the live list:
+
+```yaml
+type: vertical-stack
+cards:
+  - type: entities
+    title: Add a scheduled feed
+    entities:
+      - entity: input_datetime.polar_schedule_time
+        name: Time
+      - entity: input_select.polar_schedule_plate
+        name: Plate
+      - entity: input_number.polar_schedule_duration
+        name: Duration
+      - input_boolean.polar_schedule_mon
+      - input_boolean.polar_schedule_tue
+      - input_boolean.polar_schedule_wed
+      - input_boolean.polar_schedule_thu
+      - input_boolean.polar_schedule_fri
+      - input_boolean.polar_schedule_sat
+      - input_boolean.polar_schedule_sun
+      - entity: script.polar_schedule_add
+        name: Add schedule
+  - type: markdown
+    title: Scheduled feeds
+    content: >-
+      {% set entries = state_attr('sensor.polar_wet_food_feeder_scheduled_feeds', 'entries') or [] %}
+      {% set names = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'] %}
+      {% for e in entries %}**{{ e.index }}.** {{ e.time }} · plate {{ e.plate }} ·
+      {{ e.duration }} s · {% for d in e.days %}{{ names[d] }}{% if not loop.last %}, {% endif %}{% endfor %}{% if not e.enabled %} · disabled{% endif %}
+      {% else %}**No scheduled feeds.**{% endfor %}
+  - type: entities
+    title: Manage schedules
+    entities:
+      - entity: input_number.polar_schedule_entry
+        name: Entry number
+      - script.polar_schedule_enable
+      - script.polar_schedule_disable
+      - script.polar_schedule_remove
+      - script.polar_schedule_clear
+```
+
+Prefer this over an HA `time` automation: the service scheduler survives HA
+outages and there is no double-feed risk. Use an automation only for things the
+schedule file cannot express (conditions, notifications).
+
+## 5. Automation example — feed on a one-off event
 
 ```yaml
 alias: Polar morning feed
@@ -145,5 +222,5 @@ action:
 mode: single
 ```
 
-(Or skip HA entirely and use the service's built-in schedule file —
-`/root/polar_schedule.json` on the Polar host.)
+(Or skip HA entirely and publish `polar/cmd/schedule` yourself — the schedule
+lives on the Polar host and keeps running when HA is down.)

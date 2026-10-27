@@ -19,8 +19,8 @@ Every publish is retained and idempotent, so this is safe to run repeatedly:
 the supplied systemd timer runs it every five minutes and after boot, which
 restores the entities whenever a broker loses its retained store.
 
-Entities (state from the retained ``polar/status`` message, commands on
-``polar/cmd/*``):
+Entities (state from the retained ``polar/status`` message, schedule from the
+retained ``polar/schedule`` message, commands on ``polar/cmd/*``):
 
     binary_sensor  online
     sensor         temperature, rssi, heartbeat, schedule
@@ -55,6 +55,7 @@ DEVICE = {
     'model': 'PLAF109',
 }
 STATUS = '%s/status' % PREFIX
+SCHEDULE = '%s/schedule' % PREFIX
 CMD_SET = '%s/cmd/set' % PREFIX
 CMD_BELL = '%s/cmd/bell' % PREFIX
 
@@ -107,10 +108,10 @@ CONFIGS = {
         name='Scheduled feeds',
         unique_id='polar_feeder_sched',
         icon='mdi:calendar-clock',
-        state_topic=STATUS,
-        value_template='{{ value_json.schedule | count }}',
-        json_attributes_topic=STATUS,
-        json_attributes_template='{{ {"entries": value_json.schedule} | tojson }}',
+        state_topic=SCHEDULE,
+        value_template='{{ value_json.count }}',
+        json_attributes_topic=SCHEDULE,
+        json_attributes_template='{{ {"entries": value_json.entries} | tojson }}',
     ),
     'switch/%s/sound' % NODE: cfg(
         name='Sound',

@@ -389,7 +389,12 @@ fn midnight_day_filter_and_stale_limit() {
     let entry = json!({"time":"23:59","days":[4]});
     assert_eq!(
         schedule_due(&entry, cloud().tz, utc("2026-10-10T07:01:00"), before).unwrap(),
-        Some(("2026-10-09".into(), "23:59".into(), "1".into()))
+        Some((
+            "2026-10-09".into(),
+            "23:59".into(),
+            "1".into(),
+            content_id(&json!({"time":"23:59","plate":1,"duration":240,"days":[4]}))
+        ))
     );
     assert!(
         schedule_due(&entry, cloud().tz, utc("2026-10-10T07:06:00"), before)
@@ -610,21 +615,27 @@ fn bell_command_and_retained_guard() {
     assert!(c.attrs.is_empty());
 }
 #[test]
-fn summary_defaults_limit_and_malformed_file() {
+fn summary_normalizes_and_survives_malformed_file() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target")
         .join(format!("summary-{}.json", id()));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     assert_eq!(schedule_summary(&path).unwrap(), json!([]));
     let mut entries = vec![Value::Null];
-    entries.extend((0..14).map(|_| json!({"time":"06:00"})));
+    entries.extend((0..14).map(|i| json!({"time":format!("{i:02}:00")})));
     std::fs::write(&path, json!(entries).to_string()).unwrap();
     let result = schedule_summary(&path).unwrap();
-    assert_eq!(result.as_array().unwrap().len(), 12);
     assert_eq!(
-        result[0],
-        json!({"time":"06:00","plate":1,"duration":240,"days":null})
+        result.as_array().unwrap().len(),
+        14,
+        "every valid entry is reported (no 12-entry display cap)"
     );
+    assert_eq!(result[0]["time"], json!("00:00"));
+    assert_eq!(result[0]["plate"], json!(1));
+    assert_eq!(result[0]["duration"], json!(240));
+    assert_eq!(result[0]["days"], json!([0, 1, 2, 3, 4, 5, 6]));
+    assert_eq!(result[0]["enabled"], json!(true));
+    assert!(result[0]["id"].as_str().is_some());
     std::fs::write(&path, b"{").unwrap();
     assert_eq!(schedule_summary(&path).unwrap(), json!([]));
     std::fs::remove_file(path).unwrap();
@@ -755,4 +766,131 @@ fn attr_fetch_waits_for_broker_and_ignores_failed_device_reply() {
     )
     .unwrap();
     assert!(c.attrs.is_empty());
+}
+
+fn temp_schedule(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("polar-sched-{}-{}", name, std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("schedule.json")
+}
+
+#[test]
+fn schedule_command_adds_persists_and_publishes() {
+    let path = temp_schedule("add");
+    let _ = std::fs::remove_file(&path);
+    let mut c = cloud();
+    c.schedule_file = path.clone();
+    let mut published: Vec<(String, Value, bool)> = Vec::new();
+    {
+        let mut send = |topic: &str, payload: Value, retain: bool| {
+            published.push((topic.to_string(), payload, retain));
+            true
+        };
+        c.message(
+            "polar/cmd/schedule",
+            br#"{"action":"add","time":"06:30","plate":2,"duration":180,"days":[1,3]}"#,
+            false,
+            now(),
+            Instant::now(),
+            &mut send,
+        )
+        .unwrap();
+    }
+    let entries = read_entries(&path).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["time"], json!("06:30"));
+    assert_eq!(entries[0]["plate"], json!(2));
+    assert_eq!(entries[0]["duration"], json!(180));
+    assert_eq!(entries[0]["days"], json!([1, 3]));
+    assert_eq!(entries[0]["enabled"], json!(true));
+    let state = published
+        .iter()
+        .find(|(topic, _, _)| topic == "polar/schedule")
+        .expect("schedule state must be republished");
+    assert_eq!(state.1["count"], json!(1));
+    assert_eq!(state.1["entries"][0]["index"], json!(1));
+    assert!(state.2, "schedule state must be retained");
+
+    // The same entry twice is rejected, not duplicated.
+    assert!(c
+        .message(
+            "polar/cmd/schedule",
+            br#"{"action":"add","time":"06:30","plate":2,"duration":180,"days":[1,3]}"#,
+            false,
+            now(),
+            Instant::now(),
+            &mut |_, _, _| true,
+        )
+        .is_err());
+    assert_eq!(read_entries(&path).unwrap().len(), 1);
+
+    // Disable by id, then remove by 1-based index.
+    let id = entries[0]["id"].as_str().unwrap().to_string();
+    c.message(
+        "polar/cmd/schedule",
+        format!(r#"{{"action":"disable","id":"{id}"}}"#).as_bytes(),
+        false,
+        now(),
+        Instant::now(),
+        &mut |_, _, _| true,
+    )
+    .unwrap();
+    assert_eq!(read_entries(&path).unwrap()[0]["enabled"], json!(false));
+    c.message(
+        "polar/cmd/schedule",
+        br#"{"action":"remove","index":1}"#,
+        false,
+        now(),
+        Instant::now(),
+        &mut |_, _, _| true,
+    )
+    .unwrap();
+    assert!(read_entries(&path).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn schedule_command_rejects_bad_input_and_clears() {
+    let path = temp_schedule("bad");
+    let _ = std::fs::remove_file(&path);
+    let mut c = cloud();
+    c.schedule_file = path.clone();
+    for bad in [
+        r#"{"action":"add","time":"6:30"}"#,
+        r#"{"action":"add","time":"06:30","plate":4}"#,
+        r#"{"action":"add","time":"06:30","duration":0}"#,
+        r#"{"action":"add","time":"06:30","days":[]}"#,
+        r#"{"action":"add","time":"06:30","days":[7]}"#,
+        r#"{"action":"nonsense"}"#,
+        r#"{"action":"remove","index":3}"#,
+    ] {
+        assert!(
+            c.message("polar/cmd/schedule", bad.as_bytes(), false, now(), Instant::now(), &mut |_, _, _| true)
+                .is_err(),
+            "should reject {bad}"
+        );
+    }
+    write_entries(&path, &[json!({"time":"07:00"}), json!({"time":"08:00","enabled":false})]).unwrap();
+    assert_eq!(read_entries(&path).unwrap().len(), 2);
+    c.message("polar/cmd/schedule", br#"{"action":"clear"}"#, false, now(), Instant::now(), &mut |_, _, _| true)
+        .unwrap();
+    assert!(read_entries(&path).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn disabled_entries_never_fire_and_ids_dedupe() {
+    let path = temp_schedule("fire");
+    write_entries(&path, &[json!({"time":"06:00","enabled":false})]).unwrap();
+    let mut c = cloud();
+    c.schedule_file = path.clone();
+    let entries = json!(read_entries(&path).unwrap());
+    let mut calls = 0;
+    c.schedule(&entries, utc("2026-10-09T13:00:00"), &mut |_, _, _| {
+        calls += 1;
+        true
+    })
+    .unwrap();
+    assert_eq!(calls, 0, "a disabled entry must not feed");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
 }

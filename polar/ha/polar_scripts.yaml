@@ -1,0 +1,98 @@
+# Polar (PLAF109) Home Assistant scripts: per-plate feeds with a custom duration
+# and schedule management for the local-cloud service.
+#
+# Append to scripts.yaml (or a scripts package) next to polar/ha/polar_local.yaml,
+# then reload scripts. Entity ids assume the helpers from that package.
+
+polar_feed_plate_1:
+  alias: "Polar feed plate 1"
+  description: "Feed plate 1 for the dashboard's custom duration"
+  mode: single
+  sequence:
+    - service: mqtt.publish
+      data:
+        topic: polar/cmd/feed
+        qos: 1
+        payload: '{"plate": 1, "duration": {{ states(''input_number.polar_feed_duration'') | int(60) }}}'
+
+polar_feed_plate_2:
+  alias: "Polar feed plate 2"
+  description: "Feed plate 2 for the dashboard's custom duration"
+  mode: single
+  sequence:
+    - service: mqtt.publish
+      data:
+        topic: polar/cmd/feed
+        qos: 1
+        payload: '{"plate": 2, "duration": {{ states(''input_number.polar_feed_duration'') | int(60) }}}'
+
+polar_feed_plate_3:
+  alias: "Polar feed plate 3"
+  description: "Feed plate 3 for the dashboard's custom duration"
+  mode: single
+  sequence:
+    - service: mqtt.publish
+      data:
+        topic: polar/cmd/feed
+        qos: 1
+        payload: '{"plate": 3, "duration": {{ states(''input_number.polar_feed_duration'') | int(60) }}}'
+
+polar_schedule_add:
+  alias: "Polar schedule add"
+  description: "Add the dashboard's schedule entry (time, plate, duration, days)"
+  mode: single
+  sequence:
+    - service: mqtt.publish
+      data:
+        topic: polar/cmd/schedule
+        qos: 1
+        payload: >-
+          {% set ns = namespace(days=[]) -%}
+          {%- for d in ['mon','tue','wed','thu','fri','sat','sun'] -%}
+          {%- if is_state('input_boolean.polar_schedule_' ~ d, 'on') -%}{% set ns.days = ns.days + [loop.index0] %}{%- endif -%}
+          {%- endfor -%}
+          {"action":"add","time":"{{ states('input_datetime.polar_schedule_time')[0:5] }}","plate":{{ states('input_select.polar_schedule_plate') | int }},"duration":{{ states('input_number.polar_schedule_duration') | int }},"days":{{ ns.days | tojson }}}
+
+polar_schedule_enable:
+  alias: "Polar schedule enable"
+  description: "Enable the schedule entry number selected on the dashboard"
+  mode: single
+  sequence:
+    - service: mqtt.publish
+      data:
+        topic: polar/cmd/schedule
+        qos: 1
+        payload: '{"action": "enable", "index": {{ states(''input_number.polar_schedule_entry'') | int(1) }}}'
+
+polar_schedule_disable:
+  alias: "Polar schedule disable"
+  description: "Disable the schedule entry number selected on the dashboard"
+  mode: single
+  sequence:
+    - service: mqtt.publish
+      data:
+        topic: polar/cmd/schedule
+        qos: 1
+        payload: '{"action": "disable", "index": {{ states(''input_number.polar_schedule_entry'') | int(1) }}}'
+
+polar_schedule_remove:
+  alias: "Polar schedule remove"
+  description: "Remove the schedule entry number selected on the dashboard"
+  mode: single
+  sequence:
+    - service: mqtt.publish
+      data:
+        topic: polar/cmd/schedule
+        qos: 1
+        payload: '{"action": "remove", "index": {{ states(''input_number.polar_schedule_entry'') | int(1) }}}'
+
+polar_schedule_clear:
+  alias: "Polar schedule clear"
+  description: "Remove every scheduled feed from the feeder"
+  mode: single
+  sequence:
+    - service: mqtt.publish
+      data:
+        topic: polar/cmd/schedule
+        qos: 1
+        payload: '{"action": "clear"}'

@@ -1,0 +1,80 @@
+# Polar (PLAF109) Home Assistant helpers: per-plate custom-duration feeds and a
+# schedule editor for the local-cloud service.
+#
+# Drop this file in HA's `packages/` folder (configuration.yaml needs
+# `homeassistant: packages: !include_dir_named packages`), then reload the
+# helper domains so the entities appear without a restart:
+#
+#   service: input_boolean.reload
+#   service: input_datetime.reload
+#   service: input_number.reload
+#   service: input_select.reload
+#
+# Pair it with the scripts in polar/ha/polar_scripts.yaml.
+
+input_number:
+  polar_feed_duration:
+    name: Polar feed duration
+    min: 5
+    max: 600
+    step: 5
+    mode: slider
+    unit_of_measurement: s
+    icon: mdi:timer-outline
+    initial: 60
+  polar_schedule_duration:
+    name: Polar schedule duration
+    min: 5
+    max: 600
+    step: 5
+    mode: box
+    unit_of_measurement: s
+    icon: mdi:timer-outline
+    initial: 180
+  polar_schedule_entry:
+    name: Polar schedule entry
+    min: 1
+    max: 24
+    step: 1
+    mode: box
+    icon: mdi:format-list-numbered
+    initial: 1
+
+input_datetime:
+  polar_schedule_time:
+    name: Polar schedule time
+    has_date: false
+    has_time: true
+    initial: "08:00:00"
+
+input_select:
+  polar_schedule_plate:
+    name: Polar schedule plate
+    options:
+      - "1"
+      - "2"
+      - "3"
+    initial: "1"
+
+input_boolean:
+  polar_schedule_mon:
+    name: Polar schedule Mon
+    icon: mdi:calendar-week
+  polar_schedule_tue:
+    name: Polar schedule Tue
+    icon: mdi:calendar-week
+  polar_schedule_wed:
+    name: Polar schedule Wed
+    icon: mdi:calendar-week
+  polar_schedule_thu:
+    name: Polar schedule Thu
+    icon: mdi:calendar-week
+  polar_schedule_fri:
+    name: Polar schedule Fri
+    icon: mdi:calendar-week
+  polar_schedule_sat:
+    name: Polar schedule Sat
+    icon: mdi:calendar-weekend
+  polar_schedule_sun:
+    name: Polar schedule Sun
+    icon: mdi:calendar-weekend

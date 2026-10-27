@@ -141,40 +141,27 @@ pub fn set_payload(data: &Value, now: DateTime<Utc>) -> Result<Value> {
     result[attr] = value.clone();
     Ok(result)
 }
-pub fn schedule_summary(path: &std::path::Path) -> Result<Value> {
-    let raw = match std::fs::read(path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(json!([])),
-        Err(err) => return Err(err.into()),
-    };
-    let entries = serde_json::from_slice::<Value>(&raw).unwrap_or(Value::Null);
-    let Some(entries) = entries.as_array() else {
-        return Ok(json!([]));
-    };
-    Ok(Value::Array(
-        entries
-            .iter()
-            .filter(|e| e.is_object())
-            .take(12)
-            .map(|e| {
-                json!({
-                    "time":e.get("time"), "plate":e.get("plate").unwrap_or(&json!(1)),
-                    "duration":e.get("duration").unwrap_or(&json!(240)), "days":e.get("days")
-                })
-            })
-            .collect(),
-    ))
+/// Longest schedule the file may hold.
+pub const MAX_SCHEDULES: usize = 24;
+
+/// Deterministic, stable id for entries that arrive without one (hand-edited
+/// files, older schedule files) so the HA list and its remove-by-id stay in
+/// sync across reloads.
+fn content_id(value: &Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_default();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("h{hash:016x}")
 }
 
-pub type ScheduleKey = (String, String, String);
-pub fn schedule_due(
-    entry: &Value,
-    tz: Tz,
-    now: DateTime<Utc>,
-    previous: Option<i64>,
-) -> Result<Option<ScheduleKey>> {
+/// Validate one schedule entry and return the canonical form that is stored and
+/// published: `{id, time, plate, duration, days, enabled}`.
+pub fn normalize_entry(entry: &Value) -> Result<Value> {
     ensure!(entry.is_object(), "schedule entry must be an object");
-    let clock = entry["time"].as_str().unwrap_or("");
+    let clock = entry["time"].as_str().unwrap_or("").to_owned();
     let b = clock.as_bytes();
     ensure!(
         b.len() == 5 && b[2] == b':' && [b[0], b[1], b[3], b[4]].iter().all(u8::is_ascii_digit),
@@ -185,7 +172,15 @@ pub fn schedule_due(
     ensure!(hour <= 23 && minute <= 59, "schedule time out of range");
     let plate = entry.get("plate").cloned().unwrap_or(json!(1));
     positive(&plate, "plate")?;
-    positive(entry.get("duration").unwrap_or(&json!(240)), "duration")?;
+    let plate = plate.as_i64().unwrap_or(1);
+    ensure!((1..=3).contains(&plate), "plate must be 1..3");
+    let duration = entry.get("duration").cloned().unwrap_or(json!(240));
+    positive(&duration, "duration")?;
+    let duration = duration.as_i64().unwrap_or(240);
+    ensure!(
+        (1..=3600).contains(&duration),
+        "duration must be 1..3600 seconds"
+    );
     let days = entry
         .get("days")
         .cloned()
@@ -193,10 +188,136 @@ pub fn schedule_due(
     let days = days
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("schedule days must be integers 0..6"))?;
-    ensure!(
-        days.iter().all(|d| d.as_u64().is_some_and(|n| n <= 6)),
-        "schedule days must be integers 0..6"
-    );
+    let mut days_out: Vec<u64> = Vec::new();
+    for day in days {
+        match day.as_u64() {
+            Some(d) if d <= 6 => {
+                if !days_out.contains(&d) {
+                    days_out.push(d);
+                }
+            }
+            _ => bail!("schedule days must be integers 0..6"),
+        }
+    }
+    days_out.sort_unstable();
+    ensure!(!days_out.is_empty(), "schedule needs at least one day");
+    let enabled = match entry.get("enabled") {
+        Some(Value::Bool(flag)) => *flag,
+        Some(_) => bail!("schedule enabled must be a boolean"),
+        None => true,
+    };
+    let id = match entry.get("id").and_then(Value::as_str) {
+        Some(id)
+            if !id.is_empty()
+                && id.len() <= 40
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') =>
+        {
+            id.to_owned()
+        }
+        Some(_) => bail!("schedule id must be 1-40 chars of [A-Za-z0-9_-]"),
+        None => String::new(),
+    };
+    let seed = json!({
+        "time":clock, "plate":plate, "duration":duration, "days":days_out
+    });
+    let id = if id.is_empty() { content_id(&seed) } else { id };
+    Ok(json!({
+        "id":id, "time":clock, "plate":plate, "duration":duration,
+        "days":days_out, "enabled":enabled
+    }))
+}
+
+/// Read the schedule file, discarding entries that no longer validate.
+pub fn read_entries(path: &std::path::Path) -> Result<Vec<Value>> {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.into()),
+    };
+    let value = serde_json::from_slice::<Value>(&raw).unwrap_or(Value::Null);
+    Ok(value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|entry| normalize_entry(entry).ok())
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// Write the canonical schedule atomically (temp file + rename).
+pub fn write_entries(path: &std::path::Path, entries: &[Value]) -> Result<()> {
+    let body = serde_json::to_vec_pretty(&Value::Array(entries.to_vec()))?;
+    let tmp = path.with_extension("json.tmp");
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(&tmp, body)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// The retained `polar/schedule` payload: count + every entry (1-based index).
+pub fn schedule_state(entries: &[Value]) -> Value {
+    let items: Vec<Value> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let mut entry = entry.clone();
+            entry["index"] = json!(i + 1);
+            entry
+        })
+        .collect();
+    json!({"count": items.len(), "entries": items})
+}
+
+pub fn schedule_summary(path: &std::path::Path) -> Result<Value> {
+    Ok(schedule_state(&read_entries(path)?)["entries"].clone())
+}
+
+/// Resolve a command's `index` (1-based) or `id` to a position in `entries`.
+fn schedule_index(data: &Value, entries: &[Value]) -> Result<usize> {
+    if let Some(index) = data.get("index").and_then(Value::as_u64) {
+        let index = index as usize;
+        ensure!(
+            index >= 1 && index <= entries.len(),
+            "schedule index out of range"
+        );
+        return Ok(index - 1);
+    }
+    if let Some(id) = data.get("id").and_then(Value::as_str) {
+        if let Some(pos) = entries
+            .iter()
+            .position(|entry| entry["id"].as_str() == Some(id))
+        {
+            return Ok(pos);
+        }
+        bail!("no schedule entry with id {id}");
+    }
+    bail!("schedule command needs index or id")
+}
+
+pub type ScheduleKey = (String, String, String, String);
+pub fn schedule_due(
+    entry: &Value,
+    tz: Tz,
+    now: DateTime<Utc>,
+    previous: Option<i64>,
+) -> Result<Option<ScheduleKey>> {
+    let entry = normalize_entry(entry)?;
+    if !entry["enabled"].as_bool().unwrap_or(true) {
+        return Ok(None);
+    }
+    let clock = entry["time"].as_str().unwrap_or("").to_owned();
+    let hour: u32 = clock[..2].parse()?;
+    let minute: u32 = clock[3..].parse()?;
+    let plate = entry["plate"].as_i64().unwrap_or(1);
+    let days = entry["days"].as_array().cloned().unwrap_or_default();
     let current = now.timestamp().div_euclid(60);
     let start = previous.map_or(current, |p| (current - 5).max(p.min(current)));
     for m in start..=current {
@@ -206,8 +327,9 @@ pub fn schedule_due(
         {
             return Ok(Some((
                 local.date_naive().to_string(),
-                clock.to_string(),
+                clock,
                 plate.to_string(),
+                entry["id"].as_str().unwrap_or("").to_owned(),
             )));
         }
     }
@@ -383,6 +505,8 @@ impl Cloud {
                 data["value"].clone(),
             );
             self.publish(&service, payload, false, send);
+        } else if topic == "polar/cmd/schedule" {
+            self.schedule_command(&data, send)?;
         } else if topic == "polar/cmd/bell" {
             // Captured from the vendor cloud: the chime is a function test, not an
             // attribute write. `ATTR_SET_SERVICE {ringerMode:"RING"}` is accepted
@@ -420,6 +544,55 @@ impl Cloud {
                 self.publish("polar/status", json!({"online":false,"seen_at":now.timestamp_millis() - silence.as_millis() as i64}), true, send);
             }
         }
+    }
+    /// Republish the retained `polar/schedule` state (entries + count).
+    pub fn publish_schedule(&self, send: &mut Publisher<'_>) -> bool {
+        let entries = read_entries(&self.schedule_file).unwrap_or_default();
+        self.publish("polar/schedule", schedule_state(&entries), true, send)
+    }
+    /// Apply a `polar/cmd/schedule` request and persist the result.
+    ///
+    /// Actions: `list`, `add`, `remove`, `enable`, `disable`, `clear`. `remove`
+    /// and `enable`/`disable` accept either a 1-based `index` or an entry `id`.
+    pub fn schedule_command(&mut self, data: &Value, send: &mut Publisher<'_>) -> Result<()> {
+        let action = data.get("action").and_then(Value::as_str).unwrap_or("list");
+        let mut entries = read_entries(&self.schedule_file)?;
+        match action {
+            "list" => {}
+            "add" => {
+                ensure!(
+                    entries.len() < MAX_SCHEDULES,
+                    "schedule is full ({MAX_SCHEDULES} entries max)"
+                );
+                let entry = normalize_entry(data)?;
+                ensure!(
+                    !entries.iter().any(|existing| existing["id"] == entry["id"]),
+                    "that schedule entry already exists"
+                );
+                entries.push(entry);
+                write_entries(&self.schedule_file, &entries)?;
+            }
+            "remove" => {
+                let index = schedule_index(data, &entries)?;
+                entries.remove(index);
+                write_entries(&self.schedule_file, &entries)?;
+            }
+            "enable" | "disable" => {
+                let index = schedule_index(data, &entries)?;
+                entries[index]["enabled"] = json!(action == "enable");
+                write_entries(&self.schedule_file, &entries)?;
+            }
+            "clear" => {
+                entries.clear();
+                write_entries(&self.schedule_file, &entries)?;
+            }
+            other => bail!("unknown schedule action: {other}"),
+        }
+        if let Some(status) = self.last_status.as_mut() {
+            status.insert("schedule".into(), schedule_state(&entries)["entries"].clone());
+        }
+        self.publish("polar/schedule", schedule_state(&entries), true, send);
+        Ok(())
     }
     pub fn schedule(
         &mut self,

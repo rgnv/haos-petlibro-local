@@ -54,6 +54,7 @@ async fn main() -> Result<()> {
                         cloud.on_connect(Instant::now());
                         delay = 2;
                         for topic in cloud.subscriptions() { client.try_subscribe(topic, QoS::AtLeastOnce)?; }
+                        cloud.publish_schedule(&mut send);
                         eprintln!("broker connected; subscribed to device topics + polar/cmd/#");
                     }
                     Ok(Event::Incoming(Packet::Publish(msg))) => {

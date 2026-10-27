@@ -139,19 +139,40 @@ undo this setting; moving to another network requires a reachable broker address
 
 ## Schedules and Home Assistant
 
-Edit `/root/polar_schedule.json` (created as `[]`):
+The schedule lives in `/root/polar_schedule.json` and is managed over MQTT — no
+file editing required. Publish to `polar/cmd/schedule` (never retain commands):
+
+| action | example payload | effect |
+|---|---|---|
+| `add` | `{"action":"add","time":"06:30","plate":2,"duration":180,"days":[1,3,5]}` | validate and append (24 entries max, duplicates rejected) |
+| `remove` | `{"action":"remove","index":2}` or `{"action":"remove","id":"h16f…"}` | delete one entry |
+| `enable` / `disable` | `{"action":"disable","index":2}` (or `id`) | keep an entry but stop it firing |
+| `clear` | `{"action":"clear"}` | delete every entry |
+| `list` | `{"action":"list"}` | republish the state only |
+
+Every mutation is persisted atomically (temp file + rename) and republished as the
+retained `polar/schedule` state, so consumers see the new list immediately:
 
 ```json
-[{"time":"06:00","plate":1,"duration":240,"days":[0,1,2,3,4,5,6]}]
+{"count":1,"entries":[{"id":"h16f7423c0b41bbed","index":1,"time":"06:30",
+                       "plate":2,"duration":180,"days":[1,3,5],"enabled":true}]}
 ```
 
-Days: Monday=0 through Sunday=6. Times use `POLAR_TIMEZONE`; entries reload roughly
-every 20 seconds. Catch-up is limited to five minutes. Deduplication is in memory:
-a service restart during a scheduled minute can feed twice. Do not run identical
-schedules in HA and this service. No device-plan synchronization is implemented.
+Fields: `time` is `HH:MM` in `POLAR_TIMEZONE`; `plate` 1-3; `duration` 1-3600
+seconds; `days` Monday=0 through Sunday=6 (at least one); `enabled` defaults to
+true. Entries that arrive without an `id` get a stable content hash, so a
+hand-edited file keeps working and keeps its remove-by-id target. The scheduler
+reloads the file roughly every 20 seconds, catches up at most five minutes and
+skips disabled entries. Deduplication is in memory: a service restart during a
+scheduled minute can feed twice. Do not run identical schedules in HA and this
+service. No device-plan synchronization is implemented.
+
 The service itself does not talk to Home Assistant; the optional discovery
-publisher in [the HA examples](../polar/dashboard/README.md) exposes status and
-controls (including the schedule summary) as MQTT entities.
+publisher in [the HA examples](../polar/dashboard/README.md) exposes status,
+controls and the live schedule (`polar/schedule`) as MQTT entities. Ready-made
+helpers and scripts for a full authoring UI — per-plate custom-duration feeds,
+plus add/enable/disable/remove/clear for schedules — ship in
+[`polar/ha/`](../polar/ha/polar_local.yaml).
 
 ## Relay / vendor-app mode
 
