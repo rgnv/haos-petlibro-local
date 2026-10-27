@@ -384,7 +384,10 @@ impl Cloud {
             );
             self.publish(&service, payload, false, send);
         } else if topic == "polar/cmd/bell" {
-            self.publish(&service, json!({"cmd":"ATTR_SET_SERVICE", "ts":now.timestamp_millis(), "msgId":format!("bell-{}", &id()[..8]), "ringerMode":"RING"}), false, send);
+            // Captured from the vendor cloud: the chime is a function test, not an
+            // attribute write. `ATTR_SET_SERVICE {ringerMode:"RING"}` is accepted
+            // (code 0, echoed in ATTR_PUSH_EVENT) but never makes a sound.
+            self.publish(&service, json!({"cmd":"DEVICE_FUNCTION_TEST_SERVICE","ts":now.timestamp_millis(),"action":"AUDIO","linkId":id()}), false, send);
         }
         Ok(())
     }

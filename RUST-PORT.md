@@ -50,8 +50,11 @@ live host happened afterwards and was smoke-tested — see Verification.
   allowlist, including `platePosition`. Null values and unknown attributes are
   rejected; values otherwise pass through unchanged. The local attribute cache
   updates before publish, even if disconnected, matching Python. Incoming
-  `ATTR_PUSH_EVENT` updates only allowlisted keys. `polar/cmd/bell` emits an
-  `ATTR_SET_SERVICE` with `ringerMode:"RING"` and a `bell-` message ID.
+  `ATTR_PUSH_EVENT` updates only allowlisted keys. `polar/cmd/bell` emits
+  `DEVICE_FUNCTION_TEST_SERVICE` with `action:"AUDIO"` and a random `linkId`
+  (captured from the vendor cloud; `ringMode:"RING"` is accepted but silent) and
+  accepts any payload, because the bell takes no arguments and an MQTT button's
+  default payload is plain text.
 
 ## Recorder parity
 

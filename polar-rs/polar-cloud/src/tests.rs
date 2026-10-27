@@ -570,8 +570,10 @@ fn bell_command_and_retained_guard() {
             Instant::now(),
             &mut |_, p, r| {
                 calls += 1;
-                assert_eq!(p["ringerMode"], "RING");
-                assert!(p["msgId"].as_str().unwrap().starts_with("bell-"));
+                assert_eq!(p["cmd"], "DEVICE_FUNCTION_TEST_SERVICE");
+                assert_eq!(p["action"], "AUDIO");
+                assert_eq!(p["linkId"].as_str().unwrap().len(), 32);
+                assert!(p.get("ringerMode").is_none());
                 assert!(!r);
                 true
             },
@@ -589,8 +591,8 @@ fn bell_command_and_retained_guard() {
             Instant::now(),
             &mut |_, p, _| {
                 calls += 1;
-                assert_eq!(p["cmd"], "ATTR_SET_SERVICE");
-                assert_eq!(p["ringerMode"], "RING");
+                assert_eq!(p["cmd"], "DEVICE_FUNCTION_TEST_SERVICE");
+                assert_eq!(p["action"], "AUDIO");
                 true
             },
         )
