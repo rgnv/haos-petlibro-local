@@ -1,0 +1,11 @@
+[Unit]
+Description=Keep the Polar feeder's Home Assistant discovery configs published
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=polar-ha-discovery.service
+
+[Install]
+WantedBy=timers.target

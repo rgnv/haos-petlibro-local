@@ -148,8 +148,10 @@ Edit `/root/polar_schedule.json` (created as `[]`):
 Days: Monday=0 through Sunday=6. Times use `POLAR_TIMEZONE`; entries reload roughly
 every 20 seconds. Catch-up is limited to five minutes. Deduplication is in memory:
 a service restart during a scheduled minute can feed twice. Do not run identical
-schedules in HA and this service. No device-plan synchronization or HA discovery
-is implemented; see [the HA examples](../polar/dashboard/README.md).
+schedules in HA and this service. No device-plan synchronization is implemented.
+The service itself does not talk to Home Assistant; the optional discovery
+publisher in [the HA examples](../polar/dashboard/README.md) exposes status and
+controls (including the schedule summary) as MQTT entities.
 
 ## Relay / vendor-app mode
 

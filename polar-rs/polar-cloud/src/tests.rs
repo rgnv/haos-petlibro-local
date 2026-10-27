@@ -637,3 +637,94 @@ fn feed_has_no_invented_hardware_upper_bound() {
         .is_err());
     }
 }
+
+#[test]
+fn attr_refresh_on_connect_populates_controls() {
+    let mut c = cloud();
+    c.connected = false;
+    let mono = Instant::now();
+    c.on_connect(mono);
+    assert!(c.attr_due.is_some());
+    c.message(
+        &format!("{}/heart/post", c.base),
+        br#"{"cmd":"HEARTBEAT","count":7,"rssi":-40,"temperature":20.0,"ts":11}"#,
+        false,
+        now(),
+        mono,
+        &mut |t, p, r| {
+            assert_eq!(t, "polar/status");
+            assert_eq!(p["attrs"], json!({}));
+            assert_eq!(p["count"], 7);
+            assert!(r);
+            true
+        },
+    )
+    .unwrap();
+    let mut sent = 0;
+    let base = c.base.clone();
+    c.timers(
+        now(),
+        mono + Duration::from_secs(2),
+        &mut |t, p, r| {
+            sent += 1;
+            assert_eq!(t, format!("{base}/service/sub"));
+            assert_eq!(p["cmd"], "ATTR_GET_SERVICE");
+            assert!(p["msgId"].as_str().unwrap().starts_with("attr-"));
+            assert!(!r);
+            true
+        },
+    );
+    assert_eq!(sent, 1);
+    assert!(c.attr_due.is_none());
+    c.message(
+        &format!("{}/event/post", c.base),
+        br#"{"cmd":"ATTR_GET_SERVICE","code":0,"lightSwitch":true,"soundSwitch":false,"volume":40,"wifiSsid":"private","plateStuckCurrent":400}"#,
+        false,
+        now(),
+        mono,
+        &mut |t, p, r| {
+            assert_eq!(t, "polar/status");
+            assert_eq!(p["attrs"]["lightSwitch"], true);
+            assert_eq!(p["attrs"]["soundSwitch"], false);
+            assert_eq!(p["attrs"]["volume"], 40);
+            assert!(p["attrs"].get("wifiSsid").is_none());
+            assert!(p["attrs"].get("plateStuckCurrent").is_none());
+            assert_eq!(p["count"], 7, "status keeps heartbeat fields");
+            assert!(r);
+            true
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn attr_fetch_waits_for_broker_and_ignores_failed_device_reply() {
+    let mut c = cloud();
+    let mono = Instant::now();
+    c.on_connect(mono);
+    c.connected = false;
+    c.timers(
+        now(),
+        mono + Duration::from_secs(5),
+        &mut |_, _, _| panic!("must not publish while disconnected"),
+    );
+    assert!(c.attr_due.is_some(), "fetch stays queued until the broker returns");
+    c.connected = true;
+    let mut sent = 0;
+    c.timers(now(), mono + Duration::from_secs(6), &mut |_, p, _| {
+        sent += 1;
+        assert_eq!(p["cmd"], "ATTR_GET_SERVICE");
+        true
+    });
+    assert_eq!(sent, 1);
+    c.message(
+        &format!("{}/event/post", c.base),
+        br#"{"cmd":"ATTR_GET_SERVICE","code":2099,"lightSwitch":true}"#,
+        false,
+        now(),
+        mono,
+        &mut |_, _, _| panic!("failed replies must not touch the status"),
+    )
+    .unwrap();
+    assert!(c.attrs.is_empty());
+}

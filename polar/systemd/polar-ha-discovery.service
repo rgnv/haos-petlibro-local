@@ -1,0 +1,13 @@
+[Unit]
+Description=Publish Home Assistant MQTT discovery for the Polar feeder
+After=network-online.target mosquitto.service polar-local-cloud.service
+Wants=network-online.target mosquitto.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/polar-ha-discovery
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

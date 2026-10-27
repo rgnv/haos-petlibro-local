@@ -34,6 +34,12 @@ live host happened afterwards and was smoke-tested — see Verification.
   outage at that instant can leave retained status stale until another heartbeat.
   Status also carries cached allowlisted attributes and the first 12 schedule
   objects, reloaded from disk on each heartbeat with Python defaults.
+- The attribute cache is process-local, so the service asks the device for a full
+  dump (`ATTR_GET_SERVICE`) two seconds after every broker connect and merges the
+  allowlisted keys of the `code:0` reply, republishing the retained status
+  immediately. Without that fetch the attribute-backed controls (sound, indicator
+  light, volume) render `off` after a restart until the device happens to push an
+  `ATTR_PUSH_EVENT`. A rejected fetch reply is ignored.
 - Schedule file defaults to `/root/polar_schedule.json`, reloads every 20 seconds,
   and tolerates absence. Monday=0. Five-minute catch-up uses elapsed UTC minutes,
   then local timezone matching. Deduplication uses date/time/plate, including DST

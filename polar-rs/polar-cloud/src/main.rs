@@ -51,7 +51,7 @@ async fn main() -> Result<()> {
             event = async { tokio::time::sleep_until(reconnect_at).await; events.poll().await } => {
                 match event {
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                        cloud.connected = true;
+                        cloud.on_connect(Instant::now());
                         delay = 2;
                         for topic in cloud.subscriptions() { client.try_subscribe(topic, QoS::AtLeastOnce)?; }
                         eprintln!("broker connected; subscribed to device topics + polar/cmd/#");

@@ -221,6 +221,8 @@ pub struct Cloud {
     pub port: u16,
     pub connected: bool,
     pub config_due: Option<Instant>,
+    pub attr_due: Option<Instant>,
+    pub last_status: Option<serde_json::Map<String, Value>>,
     pub last_heart: Option<Instant>,
     pub status_online: bool,
     pub attrs: serde_json::Map<String, Value>,
@@ -240,6 +242,8 @@ impl Cloud {
             port,
             connected: false,
             config_due: None,
+            attr_due: None,
+            last_status: None,
             last_heart: None,
             status_online: false,
             attrs: serde_json::Map::new(),
@@ -250,6 +254,29 @@ impl Cloud {
     }
     pub fn subscriptions(&self) -> [String; 2] {
         [format!("{}/+/post", self.base), "polar/cmd/#".into()]
+    }
+    /// Mark the broker session live and schedule an attribute refresh.
+    ///
+    /// Attributes live only in memory, so every (re)connect starts from an empty
+    /// map. Without a fetch the attribute-backed HA entities (light/sound/volume)
+    /// render `off` until the device volunteers an ATTR_PUSH_EVENT, which it may
+    /// never do.
+    pub fn on_connect(&mut self, mono: Instant) {
+        self.connected = true;
+        self.attr_due = Some(mono + Duration::from_secs(2));
+    }
+    pub fn attr_request(&self, now: DateTime<Utc>) -> Value {
+        json!({"cmd":"ATTR_GET_SERVICE", "ts":now.timestamp_millis(), "msgId":format!("attr-{}", &id()[..8])})
+    }
+    /// Republish the retained status with the current attribute map, when a
+    /// heartbeat has already established the rest of the payload.
+    fn publish_status(&self, send: &mut Publisher<'_>) -> bool {
+        let Some(status) = self.last_status.as_ref() else {
+            return false;
+        };
+        let mut status = status.clone();
+        status.insert("attrs".into(), Value::Object(self.attrs.clone()));
+        self.publish("polar/status", Value::Object(status), true, send)
     }
     fn publish(&self, topic: &str, data: Value, retained: bool, send: &mut Publisher<'_>) -> bool {
         if !self.connected {
@@ -287,7 +314,17 @@ impl Cloud {
         if topic == format!("{}/heart/post", self.base) && cmd == "HEARTBEAT" {
             self.last_heart = Some(mono);
             self.status_online = true;
-            self.publish("polar/status", json!({"online":true,"count":data["count"],"rssi":data["rssi"],"temperature":data["temperature"],"device_ts":data["ts"],"seen_at":now.timestamp_millis(),"attrs":self.attrs,"schedule":schedule_summary(&self.schedule_file)?}), true, send);
+            let mut status = serde_json::Map::new();
+            status.insert("online".into(), json!(true));
+            status.insert("count".into(), data["count"].clone());
+            status.insert("rssi".into(), data["rssi"].clone());
+            status.insert("temperature".into(), data["temperature"].clone());
+            status.insert("device_ts".into(), data["ts"].clone());
+            status.insert("seen_at".into(), json!(now.timestamp_millis()));
+            status.insert("attrs".into(), Value::Object(self.attrs.clone()));
+            status.insert("schedule".into(), schedule_summary(&self.schedule_file)?);
+            self.last_status = Some(status.clone());
+            self.publish("polar/status", Value::Object(status), true, send);
         } else if topic == format!("{}/ntp/post", self.base) && cmd == "NTP" {
             self.publish(
                 &format!("{}/ntp/sub", self.base),
@@ -296,11 +333,20 @@ impl Cloud {
                 send,
             );
         } else if topic == format!("{}/event/post", self.base) {
-            if cmd == "ATTR_PUSH_EVENT" {
+            // ATTR_PUSH_EVENT carries a spontaneous change; the ATTR_GET_SERVICE
+            // reply to our own post-connect fetch carries the full attribute set.
+            if cmd == "ATTR_PUSH_EVENT"
+                || (cmd == "ATTR_GET_SERVICE" && data.get("code") == Some(&json!(0)))
+            {
+                let mut changed = false;
                 for (key, value) in data.as_object().unwrap() {
                     if SETTABLE_ATTRS.contains(&key.as_str()) {
                         self.attrs.insert(key.clone(), value.clone());
+                        changed = true;
                     }
+                }
+                if changed {
+                    self.publish_status(send);
                 }
             }
             if let Some(echo) = echo_payload(&self.base, topic, &data, now) {
@@ -337,6 +383,16 @@ impl Cloud {
         Ok(())
     }
     pub fn timers(&mut self, now: DateTime<Utc>, mono: Instant, send: &mut Publisher<'_>) {
+        if self.attr_due.is_some_and(|due| mono >= due)
+            && self.publish(
+                &format!("{}/service/sub", self.base),
+                self.attr_request(now),
+                false,
+                send,
+            )
+        {
+            self.attr_due = None;
+        }
         if self.config_due.is_some_and(|due| mono >= due)
             && self.publish(
                 &format!("{}/service/sub", self.base),
@@ -351,6 +407,7 @@ impl Cloud {
             let silence = mono.duration_since(heart);
             if self.status_online && silence > Duration::from_secs(240) {
                 self.status_online = false;
+                self.last_status = None;
                 self.publish("polar/status", json!({"online":false,"seen_at":now.timestamp_millis() - silence.as_millis() as i64}), true, send);
             }
         }
