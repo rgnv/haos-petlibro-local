@@ -579,6 +579,32 @@ fn bell_command_and_retained_guard() {
         .unwrap();
     }
     assert_eq!(calls, 1);
+    // An MQTT button's default payload is plain text, not JSON.
+    for payload in [b"PRESS".as_slice(), b"ring".as_slice(), b"".as_slice()] {
+        c.message(
+            "polar/cmd/bell",
+            payload,
+            false,
+            now(),
+            Instant::now(),
+            &mut |_, p, _| {
+                calls += 1;
+                assert_eq!(p["cmd"], "ATTR_SET_SERVICE");
+                assert_eq!(p["ringerMode"], "RING");
+                true
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(calls, 4);
+    // Non-JSON payloads stay rejected on every other command topic.
+    for topic in ["polar/cmd/feed", "polar/cmd/set", "polar/cmd/config"] {
+        assert!(c
+            .message(topic, b"PRESS", false, now(), Instant::now(), &mut |_, _, _| {
+                panic!("must not publish")
+            })
+            .is_err());
+    }
     assert!(c.attrs.is_empty());
 }
 #[test]

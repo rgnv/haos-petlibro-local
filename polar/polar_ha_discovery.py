@@ -154,7 +154,7 @@ CONFIGS = {
         unique_id='polar_feeder_bell',
         icon='mdi:bell-ring',
         command_topic=CMD_BELL,
-        payload='{}',
+        payload_press='{}',
     ),
     'select/%s/plate' % NODE: cfg(
         name='Plate position',

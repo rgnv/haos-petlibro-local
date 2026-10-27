@@ -298,7 +298,13 @@ impl Cloud {
         mono: Instant,
         send: &mut Publisher<'_>,
     ) -> Result<()> {
-        let data: Value = serde_json::from_slice(raw)?;
+        // The bell takes no arguments, so a plain-text payload (an MQTT button
+        // sending its default "PRESS") must not be rejected as invalid JSON.
+        let data: Value = match serde_json::from_slice(raw) {
+            Ok(value) => value,
+            Err(_) if topic == "polar/cmd/bell" => json!({}),
+            Err(err) => return Err(err.into()),
+        };
         if retained || !data.is_object() || data.get("linkId").is_some() {
             return Ok(());
         }
