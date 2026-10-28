@@ -16,3 +16,5 @@ polar_relay.log
 
 # Rust build artifacts
 **/target/
+__pycache__/
+*.pyc

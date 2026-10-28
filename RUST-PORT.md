@@ -32,8 +32,8 @@ live host happened afterwards and was smoke-tested — see Verification.
   than 240 seconds publishes offline once. No initial offline/LWT is added.
   As in Python, offline state changes before attempting publication, so a broker
   outage at that instant can leave retained status stale until another heartbeat.
-  Status also carries cached allowlisted attributes and the first 12 schedule
-  objects, reloaded from disk on each heartbeat with Python defaults.
+  Status also carries cached allowlisted attributes and the canonical schedule
+  entries (id, index, enabled), reloaded from disk on each heartbeat.
 - The attribute cache is process-local, so the service asks the device for a full
   dump (`ATTR_GET_SERVICE`) two seconds after every broker connect and merges the
   allowlisted keys of the `code:0` reply, republishing the retained status
@@ -41,11 +41,20 @@ live host happened afterwards and was smoke-tested — see Verification.
   light, volume) render `off` after a restart until the device happens to push an
   `ATTR_PUSH_EVENT`. A rejected fetch reply is ignored.
 - Schedule file defaults to `/root/polar_schedule.json`, reloads every 20 seconds,
-  and tolerates absence. Monday=0. Five-minute catch-up uses elapsed UTC minutes,
-  then local timezone matching. Deduplication uses date/time/plate, including DST
-  folds and duplicate rows; invalid rows do not starve valid rows. Rejected sends
-  retry within the catch-up window. Deduplication expires after three days and is
+  and tolerates absence. Entries are canonicalised on read (`id`, `time`, `plate`,
+  `duration`, `days`, `enabled`): `time` is `HH:MM`, plate 1-3, duration 1-3600 s,
+  at least one weekday (Monday=0), and entries without an `id` get a stable
+  content hash so hand-edited files keep a remove-by-id target. Disabled entries
+  never fire. Five-minute catch-up uses elapsed UTC minutes, then local timezone
+  matching. Deduplication uses date/time/plate/id, including DST folds and
+  duplicate rows; invalid rows do not starve valid rows. Rejected sends retry
+  within the catch-up window. Deduplication expires after three days and is
   process-local, so restarting within a scheduled minute can repeat a feed.
+- `polar/cmd/schedule` manages the file: `add` (validated, 24 max, duplicates
+  rejected), `remove`/`enable`/`disable` (by 1-based `index` or `id`), `clear`,
+  `list`. Every mutation writes atomically (same-directory temp file + rename) and
+  republishes the retained `polar/schedule` `{count, entries:[{…,index}]}`, which
+  is also republished on every broker connect so a wiped retained store heals.
 - `polar/cmd/set` uses `{"attr":"volume","value":50}` and the exact Python
   allowlist, including `platePosition`. Null values and unknown attributes are
   rejected; values otherwise pass through unchanged. The local attribute cache
@@ -115,13 +124,15 @@ Relay tests use Tokio in-memory duplex streams; recorder tests use local stub
 executables and temporary files, never a camera or broker.
 
 Full workspace validation passes on cargo 1.98.1: `cargo build --release
---workspace`, `cargo test --workspace` (34/34 — 26 cloud, 4 relay, 4 recorder),
+--workspace`, `cargo test --workspace` (39/39 — 31 cloud, 4 relay, 4 recorder),
 and zero clippy warnings; `Cargo.lock` is committed for reproducible builds. The
-Rust control surface matches the Python reference through commit `d4760de`,
+Rust control surface matches the Python reference through the schedule-API change,
 including its concurrent allowlist update. An earlier review environment could
 only run partial offline checks (29 Python protocol tests, 9 release tests, and
 the dependency-free Rust subsets under `.review/rust-offline/`); the full build
-and suite were run afterwards on a machine with dependency access.
+and suite were run afterwards on a machine with dependency access. The Python
+reference now carries the same schedule surface (43 tests: 34 protocol + 9
+release).
 
 Live deployment smoke test (Debian 13 x86_64, glibc 2.41 reference host):
 binaries installed through `scripts/install-polar.sh` and

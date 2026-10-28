@@ -1,7 +1,9 @@
 """Offline checks: no broker, subprocess, or socket connections are made."""
 import importlib
 import json
+import shutil
 import subprocess
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -196,8 +198,9 @@ class ScheduleTests(unittest.TestCase):
     def test_midnight_day_filter_and_stale_limit(self):
         before = int(utc("2026-10-10T06:59:00").timestamp()) // 60
         entry = {"time": "23:59", "days": [4]}
+        entry_id = cloud.content_id({"time": "23:59", "plate": 1, "duration": 240, "days": [4]})
         self.assertEqual(cloud.schedule_due(entry, utc("2026-10-10T07:01:00"), before),
-                         ("2026-10-09", "23:59", 1))
+                         ("2026-10-09", "23:59", 1, entry_id))
         self.assertIsNone(cloud.schedule_due(entry, utc("2026-10-10T07:06:00"), before))
         self.assertIsNone(cloud.schedule_due(dict(entry, days=[5]), utc("2026-10-10T07:01:00"), before))
 
@@ -227,6 +230,92 @@ class ScheduleTests(unittest.TestCase):
         self.client.publish.return_value.rc = 0
         self.service.sched_tick(entries, utc("2026-10-09T13:02:00"))
         self.assertEqual(len(self.service.last_fired), 1)
+
+
+class ScheduleCommandTests(unittest.TestCase):
+    """polar/cmd/schedule: validation, persistence and the retained state."""
+
+    def setUp(self):
+        self.client = Mock()
+        self.client.is_connected.return_value = True
+        self.client.publish.return_value.rc = 0
+        self.service = cloud.PolarCloud(self.client)
+        self.directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.directory, True)
+        patcher = patch.object(cloud, "SCHEDULE_FILE", os.path.join(self.directory, "schedule.json"))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.path = cloud.SCHEDULE_FILE
+
+    def send(self, **payload):
+        self.service.on_message(message("polar/cmd/schedule", payload))
+
+    def entries(self):
+        with open(self.path) as handle:
+            return json.load(handle)
+
+    def state_publishes(self):
+        return [call for call in self.client.publish.call_args_list
+                if call.args[0] == "polar/schedule"]
+
+    def test_add_persists_and_publishes_retained_state(self):
+        self.send(action="add", time="06:30", plate=2, duration=180, days=[1, 3])
+        saved = self.entries()
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["time"], "06:30")
+        self.assertEqual(saved[0]["plate"], 2)
+        self.assertEqual(saved[0]["duration"], 180)
+        self.assertEqual(saved[0]["days"], [1, 3])
+        self.assertTrue(saved[0]["enabled"])
+        self.assertRegex(saved[0]["id"], r"^h[0-9a-f]{16}$")
+        publishes = self.state_publishes()
+        self.assertEqual(len(publishes), 1)
+        state = json.loads(publishes[0].args[1])
+        self.assertEqual(state["count"], 1)
+        self.assertEqual(state["entries"][0]["index"], 1)
+        self.assertTrue(publishes[0].kwargs["retain"])
+
+    def test_duplicate_and_invalid_commands_are_ignored(self):
+        self.send(action="add", time="06:30", plate=2, duration=180, days=[1])
+        publishes = len(self.state_publishes())
+        for bad in ({"action": "add", "time": "06:30", "plate": 2, "duration": 180, "days": [1]},
+                    {"action": "add", "time": "6:30"},
+                    {"action": "add", "time": "06:30", "plate": 4},
+                    {"action": "add", "time": "06:30", "duration": 0},
+                    {"action": "add", "time": "06:30", "days": []},
+                    {"action": "add", "time": "06:30", "days": [7]},
+                    {"action": "nonsense"},
+                    {"action": "remove", "index": 5}):
+            self.send(**bad)
+        self.assertEqual(len(self.entries()), 1)
+        self.assertEqual(len(self.state_publishes()), publishes)
+
+    def test_remove_enable_disable_and_clear(self):
+        self.send(action="add", time="06:30", plate=1, duration=120, days=[0])
+        self.send(action="add", time="07:30", plate=3, duration=90, days=[2])
+        self.send(action="disable", index=2)
+        self.assertFalse(self.entries()[1]["enabled"])
+        self.send(action="disable", index=2)
+        self.send(action="enable", index=2)
+        self.assertTrue(self.entries()[1]["enabled"])
+        self.send(action="remove", index=1)
+        saved = self.entries()
+        self.assertEqual([entry["time"] for entry in saved], ["07:30"])
+        self.send(action="clear")
+        self.assertEqual(self.entries(), [])
+        self.assertEqual(json.loads(self.state_publishes()[-1].args[1])["count"], 0)
+
+    def test_disabled_entry_never_fires(self):
+        cloud.write_entries([{"time": "06:00", "enabled": False}])
+        self.service.sched_tick(cloud.read_entries(), utc("2026-10-09T13:00:00"))
+        self.client.publish.assert_not_called()
+
+    def test_summary_exposes_id_index_and_enabled(self):
+        cloud.write_entries([{"time": "06:00"}, {"time": "07:00", "enabled": False}])
+        summary = self.service.schedule_summary()
+        self.assertEqual([entry["index"] for entry in summary], [1, 2])
+        self.assertEqual(summary[1]["enabled"], False)
+        self.assertTrue(summary[0]["id"].startswith("h"))
 
 
 class ScriptTests(unittest.TestCase):

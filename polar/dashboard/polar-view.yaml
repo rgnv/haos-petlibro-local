@@ -1,0 +1,177 @@
+# Polar (PLAF109) Lovelace view — the dashboard used on the reference install.
+#
+# Prerequisites:
+#   * polar/polar_ha_discovery.py running on the broker host (creates the
+#     polar_wet_food_feeder_* entities), bridged to HA's MQTT broker;
+#   * polar/ha/polar_local.yaml installed as an HA package;
+#   * polar/ha/polar_scripts.yaml appended to scripts.yaml.
+# Entity ids can differ if you renamed entities in the UI. Paste this as a new
+# view (raw configuration editor) or into a blank dashboard and adjust ids as
+# needed. `sensor.polar_wet_food_feeder_scheduled_feeds` carries the schedule in
+# its `entries` attribute; the markdown card renders it.
+title: Polar
+path: polar
+icon: mdi:cat
+cards:
+- type: markdown
+  content: '## 🐾 Polar wet feeder
+
+    Local-only control — Home Assistant → MQTT bridge → feeder. **No cloud.**
+
+    Feed any plate for a custom time, and store scheduled feeds (time · plate · duration · days) on the
+    feeder host.'
+- type: entities
+  title: Status (live from the feeder)
+  entities:
+  - entity: binary_sensor.polar_wet_food_feeder_polar_online
+    name: Online
+  - entity: sensor.polar_wet_food_feeder_polar_temperature
+    name: Temperature
+  - entity: sensor.polar_wet_food_feeder_polar_wifi_signal
+    name: WiFi signal
+  - entity: sensor.polar_wet_food_feeder_polar_heartbeat_count
+    name: Heartbeats (since boot)
+- type: entities
+  title: Feed duration (custom timing)
+  entities:
+  - entity: input_number.polar_feed_duration
+    name: Door open time
+- type: grid
+  columns: 3
+  square: false
+  title: Feed a plate (custom duration)
+  cards:
+  - type: button
+    name: Plate 1
+    icon: mdi:food-turkey
+    show_state: false
+    tap_action:
+      action: perform-action
+      perform_action: script.polar_feed_plate_1
+  - type: button
+    name: Plate 2
+    icon: mdi:food-turkey
+    show_state: false
+    tap_action:
+      action: perform-action
+      perform_action: script.polar_feed_plate_2
+  - type: button
+    name: Plate 3
+    icon: mdi:food-turkey
+    show_state: false
+    tap_action:
+      action: perform-action
+      perform_action: script.polar_feed_plate_3
+- type: grid
+  columns: 3
+  square: false
+  title: Quick feeds (plate 1)
+  cards:
+  - type: button
+    name: 1 min
+    icon: mdi:timer-outline
+    show_state: false
+    tap_action:
+      action: perform-action
+      perform_action: script.polar_feed
+      data:
+        plate: 1
+        duration: 60
+  - type: button
+    name: 2 min
+    icon: mdi:timer-outline
+    show_state: false
+    tap_action:
+      action: perform-action
+      perform_action: script.polar_feed
+      data:
+        plate: 1
+        duration: 120
+  - type: button
+    name: 4 min
+    icon: mdi:timer-outline
+    show_state: false
+    tap_action:
+      action: perform-action
+      perform_action: script.polar_feed
+      data:
+        plate: 1
+        duration: 240
+- type: entities
+  title: Controls
+  entities:
+  - entity: switch.polar_wet_food_feeder_indicator_light
+    name: Indicator light
+  - entity: switch.polar_wet_food_feeder_sound
+    name: Sound
+  - entity: number.polar_wet_food_feeder_volume
+    name: Volume
+  - entity: button.polar_wet_food_feeder_ring_bell
+    name: Ring bell
+  - entity: select.polar_wet_food_feeder_plate_position
+    name: Plate position (rotate bowl)
+- type: entities
+  title: Add a scheduled feed
+  entities:
+  - entity: input_datetime.polar_schedule_time
+    name: Time
+  - entity: input_select.polar_schedule_plate
+    name: Plate
+  - entity: input_number.polar_schedule_duration
+    name: Duration
+  - entity: input_boolean.polar_schedule_mon
+    name: Monday
+  - entity: input_boolean.polar_schedule_tue
+    name: Tuesday
+  - entity: input_boolean.polar_schedule_wed
+    name: Wednesday
+  - entity: input_boolean.polar_schedule_thu
+    name: Thursday
+  - entity: input_boolean.polar_schedule_fri
+    name: Friday
+  - entity: input_boolean.polar_schedule_sat
+    name: Saturday
+  - entity: input_boolean.polar_schedule_sun
+    name: Sunday
+  - entity: script.polar_schedule_add
+    name: Add schedule
+    icon: mdi:calendar-plus
+- type: markdown
+  title: Scheduled feeds
+  content: '{% set entries = state_attr(''sensor.polar_wet_food_feeder_scheduled_feeds'', ''entries'')
+    or [] %}
+
+    {% set names = [''Mon'', ''Tue'', ''Wed'', ''Thu'', ''Fri'', ''Sat'', ''Sun''] %}
+
+    {% if entries | count == 0 -%}
+
+    **No scheduled feeds.** Build one above and press *Add schedule*.
+
+    {%- else %}
+
+    {% for e in entries -%}
+
+    **{{ e.index }}.** {{ e.time }} · plate {{ e.plate }} · {{ e.duration }} s · {% for d in e.days %}{{
+    names[d] }}{% if not loop.last %}, {% endif %}{% endfor %}{% if not e.enabled %} · *disabled*{% endif
+    %}
+
+    {% endfor -%}
+
+    {% endif %}'
+- type: entities
+  title: Manage schedules
+  entities:
+  - entity: input_number.polar_schedule_entry
+    name: Entry number
+  - entity: script.polar_schedule_enable
+    name: Enable entry
+    icon: mdi:calendar-check
+  - entity: script.polar_schedule_disable
+    name: Disable entry
+    icon: mdi:calendar-remove
+  - entity: script.polar_schedule_remove
+    name: Remove entry
+    icon: mdi:delete
+  - entity: script.polar_schedule_clear
+    name: Clear all schedules
+    icon: mdi:delete-sweep

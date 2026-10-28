@@ -10,8 +10,11 @@ Petlibro cloud behavior the device depends on, with no internet dependency:
     (DEVICE_START_EVENT) so its stored endpoint can never drift back to the cloud
   * local feed trigger: publish to topic `polar/cmd/feed`
     {"plate": 1, "duration": 60}  -> sends the feedNowState plan-write
-  * optional schedule from polar_schedule.json:
-    [{"time": "06:00", "plate": 1, "duration": 240, "days": [0,1,2,3,4,5,6]}]
+  * schedule management over MQTT: publish to `polar/cmd/schedule`
+    {"action":"add","time":"06:00","plate":1,"duration":240,"days":[0,1,2]}
+    (also remove/enable/disable/clear/list; state is the retained `polar/schedule`)
+  * schedule file polar_schedule.json (managed for you by the commands above):
+    [{"id":"h…","time":"06:00","plate":1,"duration":240,"days":[0,1,2],"enabled":true}]
 
 All behavior modeled from a transparent-relay capture of the real cloud
 (2026-10-09). Device: PLAF109 "Polar", serial EXAMPLE_SERIAL.
@@ -19,6 +22,7 @@ All behavior modeled from a transparent-relay capture of the real cloud
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 import uuid
@@ -155,6 +159,120 @@ def feed_payload(plate: int = 1, duration: int = 60, now=None) -> dict:
     }
 
 
+MAX_SCHEDULES = 24
+
+
+def content_id(value) -> str:
+    """Stable id for an entry that arrives without one (FNV-1a 64 of its content).
+
+    Hand-edited schedule files keep working, and the HA list keeps a
+    remove-by-id target across reloads.
+    """
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    digest = 0xCBF29CE484222325
+    for byte in text.encode("utf-8"):
+        digest = ((digest ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return f"h{digest:016x}"
+
+
+def normalize_entry(entry) -> dict:
+    """Validate one schedule entry; return the canonical stored shape."""
+    if not isinstance(entry, dict):
+        raise ValueError("schedule entry must be an object")
+    clock = entry.get("time")
+    if (not isinstance(clock, str) or len(clock) != 5 or clock[2] != ":"
+            or not clock[:2].isascii() or not clock[:2].isdigit()
+            or not clock[3:].isascii() or not clock[3:].isdigit()):
+        raise ValueError("schedule time must be HH:MM")
+    hour, minute = int(clock[:2]), int(clock[3:])
+    if hour > 23 or minute > 59:
+        raise ValueError("schedule time out of range")
+    plate = entry.get("plate", 1)
+    if type(plate) is not int or not 1 <= plate <= 3:
+        raise ValueError("plate must be 1..3")
+    duration = entry.get("duration", 240)
+    if type(duration) is not int or not 1 <= duration <= 3600:
+        raise ValueError("duration must be 1..3600 seconds")
+    days = entry.get("days", list(range(7)))
+    if not isinstance(days, list) or any(type(d) is not int or not 0 <= d <= 6 for d in days):
+        raise ValueError("schedule days must be integers 0..6")
+    days = sorted(set(days))
+    if not days:
+        raise ValueError("schedule needs at least one day")
+    enabled = entry.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("schedule enabled must be a boolean")
+    entry_id = entry.get("id")
+    if entry_id is not None:
+        if (not isinstance(entry_id, str) or not 1 <= len(entry_id) <= 40
+                or not all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in entry_id)):
+            raise ValueError("schedule id must be 1-40 chars of [A-Za-z0-9_-]")
+    seed = {"time": clock, "plate": plate, "duration": duration, "days": days}
+    return {"id": entry_id or content_id(seed), "time": clock, "plate": plate,
+            "duration": duration, "days": days, "enabled": enabled}
+
+
+def read_entries(path=None) -> list:
+    """Load the schedule file, dropping entries that no longer validate."""
+    path = SCHEDULE_FILE if path is None else path
+    try:
+        with open(path) as handle:
+            raw = json.load(handle)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as ex:
+        log.warning("cannot read schedule %s: %s", path, ex)
+        return []
+    if not isinstance(raw, list):
+        return []
+    entries = []
+    for entry in raw:
+        try:
+            entries.append(normalize_entry(entry))
+        except ValueError:
+            continue
+    return entries
+
+
+def write_entries(entries, path=None) -> None:
+    """Write the schedule atomically (same-directory temp file + rename)."""
+    path = SCHEDULE_FILE if path is None else path
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".polar-schedule-", suffix=".tmp")
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump(entries, handle, indent=2)
+            handle.write("\n")
+        os.replace(temporary, path)
+    except BaseException:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+        raise
+
+
+def schedule_state(entries) -> dict:
+    """Retained `polar/schedule` payload: count + entries with 1-based index."""
+    return {"count": len(entries),
+            "entries": [dict(entry, index=position) for position, entry in enumerate(entries, 1)]}
+
+
+def schedule_index(data, entries) -> int:
+    """Resolve a command's `index` (1-based) or `id` to a list position."""
+    index = data.get("index")
+    if type(index) is int:
+        if not 1 <= index <= len(entries):
+            raise ValueError("schedule index out of range")
+        return index - 1
+    entry_id = data.get("id")
+    if isinstance(entry_id, str):
+        for position, entry in enumerate(entries):
+            if entry["id"] == entry_id:
+                return position
+        raise ValueError(f"no schedule entry with id {entry_id}")
+    raise ValueError("schedule command needs index or id")
+
+
 def echo_payload(topic, data):
     """Fail closed: no service command, foreign topic, or linked reply can echo."""
     if (topic != f"{BASE}/event/post" or not isinstance(data, dict)
@@ -169,28 +287,23 @@ def echo_payload(topic, data):
 
 
 def schedule_due(entry, now, previous):
-    """Return daily identity if due; catch up at most five real minutes."""
-    if not isinstance(entry, dict):
-        raise ValueError("schedule entry must be an object")
-    clock = entry.get("time")
-    if (not isinstance(clock, str) or len(clock) != 5 or clock[2] != ":"
-            or not clock[:2].isascii() or not clock[:2].isdigit()
-            or not clock[3:].isascii() or not clock[3:].isdigit()):
-        raise ValueError("schedule time must be HH:MM")
-    hour, minute = map(int, clock.split(":"))
-    if hour > 23 or minute > 59:
-        raise ValueError("schedule time out of range")
-    plate, duration = entry.get("plate", 1), entry.get("duration", 240)
-    validate_feed(plate, duration)
-    days = entry.get("days", list(range(7)))
-    if not isinstance(days, list) or any(type(d) is not int or not 0 <= d <= 6 for d in days):
-        raise ValueError("schedule days must be integers 0..6")
+    """Return daily identity if due; catch up at most five real minutes.
+
+    Disabled entries never fire. The identity includes the entry id so two
+    entries at the same minute and plate both fire instead of shadowing.
+    """
+    entry = normalize_entry(entry)
+    if not entry["enabled"]:
+        return None
+    clock, plate = entry["time"], entry["plate"]
+    hour, minute = int(clock[:2]), int(clock[3:])
+    days = entry["days"]
     current = int(now.timestamp()) // 60
     start = current if previous is None else max(current - 5, min(previous, current))
     for minute_number in range(start, current + 1):
         local = datetime.fromtimestamp(minute_number * 60, TZ)
         if local.weekday() in days and (local.hour, local.minute) == (hour, minute):
-            return (local.date().isoformat(), clock, plate)
+            return (local.date().isoformat(), clock, plate, entry["id"])
     return None
 
 
@@ -280,10 +393,18 @@ class PolarCloud:
                 "msgId": "set-" + uuid.uuid4().hex[:8], attr: value,
             })
             log.info("local attr set: %s=%r", attr, value)
+        elif topic == "polar/cmd/schedule":
+            try:
+                self.schedule_command(data)
+            except (ValueError, OSError) as ex:
+                log.warning("invalid schedule command: %s", ex)
         elif topic == "polar/cmd/bell":
+            # Captured from the vendor cloud: the chime is a function test, not an
+            # attribute write. ATTR_SET_SERVICE {ringerMode:"RING"} is accepted
+            # (code 0, echoed in ATTR_PUSH_EVENT) but never makes a sound.
             self.pub(f"{BASE}/service/sub", {
-                "cmd": "ATTR_SET_SERVICE", "ts": int(time.time() * 1000),
-                "msgId": "bell-" + uuid.uuid4().hex[:8], "ringerMode": "RING",
+                "cmd": "DEVICE_FUNCTION_TEST_SERVICE", "ts": int(time.time() * 1000),
+                "action": "AUDIO", "linkId": uuid.uuid4().hex,
             })
             log.info("local bell ring")
 
@@ -322,15 +443,42 @@ class PolarCloud:
         self.last_fired = {k: v for k, v in self.last_fired.items() if v > cutoff}
 
     def schedule_summary(self):
-        """Compact view of the local schedule for the dashboard."""
-        try:
-            with open(SCHEDULE_FILE) as f:
-                entries = json.load(f)
-            return [{"time": e.get("time"), "plate": e.get("plate", 1),
-                     "duration": e.get("duration", 240), "days": e.get("days")}
-                    for e in entries if isinstance(e, dict)][:12]
-        except (FileNotFoundError, ValueError):
-            return []
+        """Compact view of the local schedule for the status payload."""
+        return schedule_state(read_entries())["entries"]
+
+    def publish_schedule(self):
+        """Republish the retained `polar/schedule` state."""
+        return self.pub("polar/schedule", schedule_state(read_entries()), retain=True)
+
+    def schedule_command(self, data):
+        """Apply a `polar/cmd/schedule` request and persist the result.
+
+        Actions: list, add, remove, enable, disable, clear. remove/enable/disable
+        take a 1-based `index` or an entry `id`.
+        """
+        action = data.get("action", "list")
+        entries = read_entries()
+        if action == "add":
+            if len(entries) >= MAX_SCHEDULES:
+                raise ValueError(f"schedule is full ({MAX_SCHEDULES} entries max)")
+            entry = normalize_entry(data)
+            if any(existing["id"] == entry["id"] for existing in entries):
+                raise ValueError("that schedule entry already exists")
+            entries.append(entry)
+            write_entries(entries)
+        elif action == "remove":
+            del entries[schedule_index(data, entries)]
+            write_entries(entries)
+        elif action in ("enable", "disable"):
+            entries[schedule_index(data, entries)]["enabled"] = action == "enable"
+            write_entries(entries)
+        elif action == "clear":
+            entries = []
+            write_entries(entries)
+        elif action != "list":
+            raise ValueError(f"unknown schedule action: {action}")
+        log.info("local schedule %s -> %d entries", action, len(entries))
+        self.publish_schedule()
 
     def sched_loop(self):
         next_schedule = 0
@@ -351,12 +499,7 @@ class PolarCloud:
                     log.info("device silent >4min -> published offline status")
                 if time.monotonic() >= next_schedule:
                     next_schedule = time.monotonic() + 20
-                    try:
-                        with open(SCHEDULE_FILE) as schedule:
-                            entries = json.load(schedule)
-                    except FileNotFoundError:
-                        entries = []
-                    self.sched_tick(entries, datetime.now(TZ))
+                    self.sched_tick(read_entries(), datetime.now(TZ))
             except Exception as ex:
                 log.error("scheduler error: %s", ex)
             time.sleep(0.5)
@@ -381,6 +524,9 @@ def main():
             (f"{BASE}/+/post", 1),
             ("polar/cmd/#", 1),
         ])
+        # Retained schedule state, so a broker that lost its retained store (or a
+        # restart) still shows the current schedule in Home Assistant.
+        cloud.publish_schedule()
         log.info("subscribed to device topics + polar/cmd/#")
 
     client.on_connect = on_connect

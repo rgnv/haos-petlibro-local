@@ -10,7 +10,7 @@ Two toolkits in one repo:
 | Path | Device | What you get |
 |---|---|---|
 | 🐱 **Tower toolkit** | Petlibro **PLAF203** "Granary Camera Feeder" (fw 3.1.54 tested) | Local MQTT control via HAOS, live camera, motion notifications to phone + watch with snapshots, 30-day local video recording, full Lovelace dashboard |
-| 🐾 **Polar toolkit** | Petlibro **PLAF109** wet-food feeder (fw 2.0.32 tested) | Credential capture, transparent relay for protocol discovery, **permanent local-only operation** (device stores YOUR broker), local "cloud" service that answers local MQTT requests, local feed commands |
+| 🐾 **Polar toolkit** | Petlibro **PLAF109** wet-food feeder (fw 2.0.32 tested) | Credential capture, transparent relay for protocol discovery, **permanent local-only operation** (device stores YOUR broker), local "cloud" service that answers local MQTT requests, local feed commands, MQTT-managed feeding schedules (add/remove/enable/clear) with a Home Assistant authoring UI |
 
 Protocols were developed on real hardware. Generalized installers need your own
 configuration; read the guides and REVIEW.md before deploying.
@@ -95,9 +95,14 @@ schedule/credential paths remain compatible. Do not run Python and Rust copies
 of the same service together: their MQTT client IDs are intentionally identical.
 
 The Rust cloud accepts `polar/cmd/set` with the same allowlisted attribute shape
-as Python, e.g. `{"attr":"volume","value":50}`. It sends `ATTR_SET_SERVICE` with
-generated `ts`/`msgId`; `polar/cmd/bell` sends `ringerMode:"RING"`. Retained
-commands are ignored. Heartbeat status includes tracked attributes and up to 12
+as Python, e.g. `{"attr":"volume","value":50}`, and sends `ATTR_SET_SERVICE` with
+generated `ts`/`msgId`. `polar/cmd/bell` sends the vendor cloud's
+`DEVICE_FUNCTION_TEST_SERVICE {action:"AUDIO"}` — the attribute-write form is
+accepted by the device but never makes a sound. `polar/cmd/schedule` manages the
+feeding schedule (`add`/`remove`/`enable`/`disable`/`clear`/`list`, selected by
+1-based `index` or entry `id`), persists it atomically and republishes the
+retained `polar/schedule` state on every change and on connect. Retained
+commands are ignored. Heartbeat status includes tracked attributes and the
 schedule entries.
 
 See [RUST-PORT.md](RUST-PORT.md) for parity details, test coverage, and validation
@@ -137,9 +142,11 @@ polar/                Python references + one-shot helpers
 ├── polar_relay.py     transparent relay: device → you → vendor cloud (protocol capture)
 ├── polar_make_local.py  one-shot: pin the device's broker to YOUR address (permanent)
 ├── polar_local_feed.py  CLI: feed now (plate + duration)
-├── polar_local_cloud.py the service: replaces the vendor cloud on your broker
-├── systemd/           service unit
-└── tests/             29 unit tests (protocol payloads, echo routing, scheduler)
+├── polar_local_cloud.py the Python reference service (same MQTT surface as the Rust one)
+├── ha/                HA helper package + scripts (per-plate feeds, schedule editor)
+├── dashboard/         dashboard README + ready-made Lovelace view
+├── systemd/           service units (local cloud, discovery publisher)
+└── tests/             34 unit tests (protocol payloads, echo routing, scheduler, schedule API)
 
 scripts/
 ├── install-tower.sh          one-command Tower deployment (HAOS)
